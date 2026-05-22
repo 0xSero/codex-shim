@@ -9,9 +9,10 @@ API endpoint. Codex points at it; the shim routes each request to whatever
 upstream the matching Factory BYOK entry uses (OpenAI / Anthropic /
 generic-chat-completion-api / ChatGPT subscription).
 
-> Status: tested on Codex Desktop **0.133.0-alpha.1** for macOS arm64.
-> Linux/Windows users should be able to skip the ASAR patch section and use the
-> shim itself unchanged.
+> Status: tested on Codex Desktop **0.133.0-alpha.1** for macOS arm64 and
+> Windows (MSIX). On macOS the picker patch and integrity re-sign are applied
+> in-place; on Windows `codex-shim patch-app` copies the read-only MSIX app to a
+> writable directory and patches both the ASAR and the executable.
 
 ---
 
@@ -34,6 +35,15 @@ python3 -m pip install --user aiohttp pytest    # only runtime dep is aiohttp
 ln -s "$PWD/bin/codex-shim" ~/.local/bin/codex-shim
 ln -s "$PWD/bin/codex-app"  ~/.local/bin/codex-app
 ln -s "$PWD/bin/codex-model" ~/.local/bin/codex-model
+```
+
+On **Windows** (PowerShell):
+
+```powershell
+git clone https://github.com/<you>/codex-shim $HOME\Documents\codex-shim
+cd $HOME\Documents\codex-shim
+python -m pip install aiohttp pytest
+# The bin/*.cmd wrappers work without PATH changes when run from the repo root.
 ```
 
 Requires Python 3.11+.
@@ -130,7 +140,9 @@ Supported `provider` values:
 
 ---
 
-## Picker patch for Codex Desktop on macOS
+## Picker patch for Codex Desktop
+
+### macOS
 
 Codex Desktop has a Statsig server-side allowlist (`use_hidden_models: true`)
 that hides any model whose slug isn't on a hardcoded list. Custom catalog
@@ -189,6 +201,39 @@ open "$APP"
 ```
 
 To roll back: `sudo rm -rf "$APP" && sudo mv "$APP.unpatched-…" "$APP"`.
+
+### Windows
+
+On Windows the Codex Desktop is installed as a read-only MSIX package under
+`Program Files\WindowsApps`. `codex-shim patch-app` automates the full process:
+
+1. Locates the Codex MSIX bundle (via directory listing or PowerShell
+   `Get-AppxPackage`).
+2. Extracts the ASAR and patches the picker filter (same `useHiddenModels`
+   boolean flip).
+3. Copies the entire app tree to `.codex-shim/codex-desktop-patched/app/`.
+4. Repacks the patched ASAR into the copy.
+5. Patches the embedded ASAR integrity SHA-256 hash inside `Codex.exe` so
+   Electron accepts the modified archive.
+
+```powershell
+codex-shim patch-app
+# Output: Patched Codex Desktop copied to: …\.codex-shim\codex-desktop-patched\app
+# Launch it with: …\.codex-shim\codex-desktop-patched\app\Codex.exe
+```
+
+Then start the shim and launch the patched executable:
+
+```powershell
+codex-shim start
+& "$HOME\Documents\codex-shim\.codex-shim\codex-desktop-patched\app\Codex.exe"
+```
+
+> **Note:** On Windows `codex-shim app` launches the original (unpatched) Codex.
+> To use custom models you must launch the **patched** executable directly until
+> the MSIX auto-updates to a version that disables the picker filter.
+
+To roll back: delete `.codex-shim/codex-desktop-patched/`.
 
 ---
 
@@ -261,6 +306,8 @@ codex-shim model list       list slugs currently usable in the picker
 codex-shim model use <slug> set the Desktop default model
 codex-shim codex -- <args>  exec `codex` CLI through the shim
 codex-shim app [path]       launch Codex Desktop through the shim
+codex-shim patch-app        patch Codex Desktop picker filter + integrity
+codex-shim restore-app      restore Codex Desktop from pre-patch backup
 
 codex-app [path]            shortcut for `codex-shim app`
 codex-model [list|<slug>]   shortcut for `codex-shim model …`
@@ -274,9 +321,12 @@ All commands accept `--settings <path>` and `--port <port>`.
 
 ```
 codex_shim/             python source (server + cli + translation)
-bin/codex-shim          main entrypoint
-bin/codex-app           shortcut wrapping `codex-shim app`
-bin/codex-model         shortcut wrapping `codex-shim model …`
+bin/codex-shim          main entrypoint (POSIX shell)
+bin/codex-app           shortcut wrapping `codex-shim app` (POSIX shell)
+bin/codex-model         shortcut wrapping `codex-shim model …` (POSIX shell)
+bin/codex-shim.cmd      main entrypoint (Windows)
+bin/codex-app.cmd       shortcut for `codex-shim app` (Windows)
+bin/codex-model.cmd     shortcut for `codex-shim model …` (Windows)
 .codex-shim/            generated catalog, config, logs, pid (gitignored)
 tests/                  pytest suite
 ```
