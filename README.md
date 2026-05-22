@@ -51,21 +51,33 @@ codex-shim list              # show generated slugs and upstream routes
 codex-shim status            # health probe
 ```
 
-### 2. Point Codex Desktop at it (no global config changes)
+### 2. Point Codex CLI at it (no global config changes)
 
 ```bash
-codex-shim app .             # launch Codex with the shim wired in
+codex-shim codex -- .        # run Codex CLI with temporary -c overrides
 ```
 
 That command applies opt-in `-c` overrides only for this launch. Your
-`~/.codex/config.toml` is left untouched. After this Codex Desktop sees every
-entry from `~/.factory/settings.json` plus an optional `OpenAI GPT-5.5
-(ChatGPT)` slug as picker entries.
+`~/.codex/config.toml` is left untouched.
+
+### 3. Point Codex Desktop at it (writes managed config)
+
+```bash
+codex-shim app .             # install managed config, then launch Desktop
+```
+
+Codex Desktop does not currently accept the same per-launch `-c` overrides as
+the CLI wrapper. `codex-shim app`, `codex-shim enable`, and
+`codex-shim model use <slug>` therefore write a clearly marked managed block to
+`~/.codex/config.toml`. `codex-shim disable` removes those managed shim blocks
+without restoring stale whole-file backups. After this Codex Desktop sees every
+entry from `~/.factory/settings.json` plus a `GPT-5.5` entry when ChatGPT
+passthrough is enabled and usable.
 
 If your Codex Desktop's model picker only shows "default" and refuses to render
 the catalog entries, you also need the **picker patch** below.
 
-### 3. (Optional) Switch the active Desktop model
+### 4. (Optional) Switch the active Desktop model
 
 ```bash
 codex-model list
@@ -140,6 +152,10 @@ A single‑boolean ASAR patch flips the allowlist branch off so the picker only
 checks the local `hidden` flag (which our catalog never sets).
 
 > **Always back up `app.asar` and `Info.plist` before patching.**
+> The built-in `codex-shim patch-app` command is currently incomplete for modern
+> Electron bundles because it does not update `ElectronAsarIntegrity` in
+> `Info.plist`; prefer the manual procedure below until that command is fixed
+> and tested on macOS.
 
 ```bash
 APP=/Applications/Codex.app
@@ -195,16 +211,15 @@ To roll back: `sudo rm -rf "$APP" && sudo mv "$APP.unpatched-…" "$APP"`.
 ## ChatGPT GPT‑5.5 passthrough (optional)
 
 If you have a ChatGPT plan with Codex access (`~/.codex/auth.json` exists with
-`auth_mode: chatgpt`), the shim exposes one synthetic slug
-`openai-gpt-5-5` (display name `OpenAI GPT-5.5 (ChatGPT)`) that proxies
+a usable `tokens.access_token`), the shim exposes one synthetic slug
+`gpt-5.5` (display name `GPT-5.5`) that proxies
 straight to `https://chatgpt.com/backend-api/codex/responses` with your access
 token. It bypasses Factory entirely and uses your ChatGPT subscription quota.
 
-It's already in `.codex-shim/custom_model_catalog.json` after `codex-shim
-generate`. Just select it in the picker.
+It is included in `.codex-shim/custom_model_catalog.json` after
+`codex-shim generate` only when usable ChatGPT auth is present.
 
-If you don't want it, delete the entry with slug `openai-gpt-5-5` from the
-generated catalog, or run with `CODEX_SHIM_DISABLE_CHATGPT=1` (TODO).
+If you don't want it, run with `CODEX_SHIM_DISABLE_CHATGPT=1`.
 
 ---
 
@@ -213,7 +228,7 @@ generated catalog, or run with `CODEX_SHIM_DISABLE_CHATGPT=1` (TODO).
 ```
 Codex Desktop ── /v1/responses ──▶ codex-shim (127.0.0.1:8765)
                                      │
-                                     ├── slug "openai-gpt-5-5"
+                                     ├── slug "gpt-5.5"
                                      │       └─▶ chatgpt.com/backend-api/codex/responses
                                      │           (Authorization: Bearer <auth.json access_token>)
                                      │
@@ -258,9 +273,9 @@ codex-shim stop             stop daemon
 codex-shim restart          restart daemon
 codex-shim list             list generated slugs and Factory routes
 codex-shim model list       list slugs currently usable in the picker
-codex-shim model use <slug> set the Desktop default model
-codex-shim codex -- <args>  exec `codex` CLI through the shim
-codex-shim app [path]       launch Codex Desktop through the shim
+codex-shim model use <slug> set the Desktop default model in managed config
+codex-shim codex -- <args>  exec `codex` CLI through temporary -c overrides
+codex-shim app [path]       install managed config and launch Codex Desktop
 
 codex-app [path]            shortcut for `codex-shim app`
 codex-model [list|<slug>]   shortcut for `codex-shim model …`
@@ -281,8 +296,10 @@ bin/codex-model         shortcut wrapping `codex-shim model …`
 tests/                  pytest suite
 ```
 
-The shim never edits `~/.codex/config.toml`. All Codex overrides are passed
-inline as `-c key=value` arguments per launch.
+The safe CLI path, `codex-shim codex -- ...`, never edits
+`~/.codex/config.toml`; it passes overrides inline as `-c key=value` arguments
+for that launch only. Desktop commands that need persistent Desktop integration
+write and later remove marked managed blocks.
 
 ---
 

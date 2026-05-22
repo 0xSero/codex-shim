@@ -9,7 +9,15 @@ from urllib.parse import urljoin
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from .settings import DEFAULT_FACTORY_SETTINGS, DEFAULT_HOST, DEFAULT_PORT, FactoryModel, FactorySettings
+from .settings import (
+    CHATGPT_MODEL_SLUG,
+    DEFAULT_FACTORY_SETTINGS,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    FactoryModel,
+    FactorySettings,
+    chatgpt_passthrough_enabled,
+)
 from .translate import (
     anthropic_to_chat_response,
     anthropic_to_response,
@@ -58,7 +66,7 @@ class ShimServer:
         body = await request.json()
         _log_incoming_request("/v1/responses", body)
         model = str(body.get("model") or "")
-        if model == "gpt-5.5" or model.startswith("openai-gpt-5-5"):
+        if chatgpt_passthrough_enabled() and (model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5")):
             return await self._chatgpt_passthrough(request, body)
         route = self._route(body)
         if route.is_openai_chat:

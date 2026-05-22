@@ -12,5 +12,3 @@ codex-shim = "codex_shim.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
-

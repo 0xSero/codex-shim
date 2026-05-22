@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -11,6 +12,7 @@ DEFAULT_FACTORY_SETTINGS = Path.home() / ".factory" / "settings.json"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 PROVIDER_NAME = "factory_byok_shim"
+CHATGPT_MODEL_SLUG = "gpt-5.5"
 
 
 def slugify(value: str) -> str:
@@ -119,8 +121,26 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def default_model_slug(models: list[FactoryModel]) -> str:
-    if not models:
-        return "gpt-5.5"
-    # Prefer the native ChatGPT passthrough slug first
-    return "gpt-5.5"
+def chatgpt_passthrough_enabled(auth_path: Path | None = None) -> bool:
+    if os.environ.get("CODEX_SHIM_DISABLE_CHATGPT", "").lower() in {"1", "true", "yes", "on"}:
+        return False
+    auth_path = auth_path or Path.home() / ".codex" / "auth.json"
+    try:
+        auth = json.loads(auth_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    tokens = auth.get("tokens") or {}
+    return bool(tokens.get("access_token"))
+
+
+def default_model_slug(models: list[FactoryModel], include_chatgpt: bool | None = None) -> str:
+    if include_chatgpt is None:
+        include_chatgpt = chatgpt_passthrough_enabled()
+    if include_chatgpt:
+        return CHATGPT_MODEL_SLUG
+    if models:
+        return models[0].slug
+    raise ValueError(
+        "No usable codex-shim models: add Factory custom models or sign in to ChatGPT, "
+        "or unset CODEX_SHIM_DISABLE_CHATGPT if ChatGPT passthrough should be used."
+    )
