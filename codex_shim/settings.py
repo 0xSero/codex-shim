@@ -41,7 +41,7 @@ class FactoryModel:
 
     @property
     def is_openai_chat(self) -> bool:
-        return self.provider in {"openai", "generic-chat-completion-api"}
+        return self.provider in {"openai", "generic-chat-completion-api", "minimax"}
 
 
 class FactorySettings:

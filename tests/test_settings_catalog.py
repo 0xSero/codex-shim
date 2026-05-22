@@ -64,6 +64,31 @@ def test_default_model_uses_chatgpt_only_with_usable_auth(tmp_path, monkeypatch)
     assert 'model = "claude-opus"' in config.read_text()
 
 
+def test_minimax_provider_uses_openai_chat_shape(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "customModels": [
+                    {
+                        "model": "MiniMax-M2.7",
+                        "displayName": "MiniMax M2.7",
+                        "provider": "minimax",
+                        "baseUrl": "https://api.minimax.io/v1",
+                        "apiKey": "secret",
+                    }
+                ]
+            }
+        )
+    )
+
+    model = FactorySettings(settings).load()[0]
+
+    assert model.slug == "minimax-m2-7"
+    assert model.is_openai_chat is True
+    assert model.is_anthropic is False
+
+
 class FactorySettingsFixture:
     @staticmethod
     def one():

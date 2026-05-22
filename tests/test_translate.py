@@ -27,6 +27,22 @@ def test_responses_function_tools_convert_to_chat_shape():
     ]
 
 
+def test_responses_to_chat_maps_developer_role_to_system():
+    body = {
+        "model": "slug",
+        "input": [
+            {"type": "message", "role": "developer", "content": "Follow repo rules."},
+            {"type": "message", "role": "user", "content": "Hi"},
+        ],
+    }
+    out = responses_to_chat(body, "real-model")
+
+    assert out["messages"] == [
+        {"role": "system", "content": "Follow repo rules."},
+        {"role": "user", "content": "Hi"},
+    ]
+
+
 def test_responses_to_anthropic_messages():
     body = {"model": "slug", "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}]}
     out = responses_to_anthropic(body, "claude-real", 123)

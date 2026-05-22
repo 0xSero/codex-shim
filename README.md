@@ -18,7 +18,8 @@ generic-chat-completion-api / ChatGPT subscription).
 ## Why
 
 Codex Desktop only shows the models its server-side Statsig config whitelists.
-If you have OpenAI / Anthropic / Z.ai / DeepSeek / Gemini / OpenRouter / Factory
+If you have OpenAI / Anthropic / Z.ai / DeepSeek / Gemini / OpenRouter /
+MiniMax / Factory
 keys you'd like to use **as first-class models in the picker**, this gets you
 there. It also lets you keep your ChatGPT subscription's GPT‑5.5 visible
 alongside everything else.
@@ -138,6 +139,7 @@ Supported `provider` values:
 |---|---|
 | `openai` | OpenAI/`/v1/chat/completions` |
 | `generic-chat-completion-api` | OpenAI-shaped chat completions |
+| `minimax` | MiniMax Token Plan OpenAI-compatible `/v1/chat/completions` |
 | `anthropic` | Anthropic `/v1/messages` |
 
 ---
@@ -238,6 +240,109 @@ Stop the local shim when done:
 
 ```bash
 codex-shim --port 8766 stop
+```
+
+---
+
+## MiniMax Token Plan actual-test path
+
+MiniMax's global Token Plan API exposes an OpenAI-compatible chat-completions
+endpoint at `https://api.minimax.io/v1`
+([MiniMax docs](https://platform.minimax.io/docs/token-plan/other-tools)).
+The shim supports this directly with `provider = "minimax"`; internally it uses
+the same `/v1/chat/completions` translation path as other OpenAI-compatible
+providers.
+
+Start from the committed-safe template, then keep the real Token Plan key in
+the ignored `.codex-shim/` runtime directory:
+
+```bash
+mkdir -p .codex-shim
+cp examples/minimax-token-plan-settings.example.json .codex-shim/minimax-settings.json
+$EDITOR .codex-shim/minimax-settings.json
+```
+
+In `.codex-shim/minimax-settings.json`, replace
+`REPLACE_WITH_MINIMAX_TOKEN_PLAN_KEY` with your MiniMax Token Plan key. You can
+also change `model` to `MiniMax-M2.7-highspeed` or another MiniMax model id,
+and `displayName` to the name you want Codex to show. Do not commit this local
+file.
+
+Generate, list, and start a shim instance on port `8767` with ChatGPT
+passthrough disabled so the test uses only MiniMax:
+
+```bash
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/minimax-settings.json \
+  --port 8767 \
+  generate
+
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/minimax-settings.json \
+  list
+
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/minimax-settings.json \
+  --port 8767 \
+  start
+```
+
+`list` prints the shim slug in the first column. With the example unchanged it
+is usually `minimax-m2-7`. Run Codex through the safe wrapper with that slug,
+replacing it if your `list` output differs:
+
+```bash
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/minimax-settings.json \
+  --port 8767 \
+  codex -- -m minimax-m2-7 .
+```
+
+For the usual local MiniMax workflow, the `codex-minimax` helper does those
+steps for you: it uses `.codex-shim/minimax-settings.json`, disables ChatGPT
+passthrough, starts the shim on port `8767`, detects the first listed slug, and
+runs Codex through the safe wrapper. On first run, if the settings file is
+missing, empty, or still has the placeholder API key, it prompts for your Token
+Plan key and model and writes the ignored local settings file.
+
+```bash
+bin/codex-minimax .
+```
+
+To change the stored MiniMax model, key, or base URL later:
+
+```bash
+bin/codex-minimax setup
+```
+
+The setup prompt shows current values and lets Enter keep them. The API key is
+not echoed; pressing Enter keeps the existing key when one is already present.
+For MiniMax's China endpoint, change the base URL to `https://api.minimaxi.com/v1`.
+
+Optional overrides:
+
+```bash
+CODEX_SHIM_MODEL=minimax-m2-7 bin/codex-minimax .
+CODEX_SHIM_PORT=8771 bin/codex-minimax .
+CODEX_SHIM_SETTINGS=/path/to/minimax-settings.json bin/codex-minimax .
+```
+
+That command uses temporary inline `-c` overrides only. To verify your normal
+Codex config was not touched, compare the file before and after:
+
+```bash
+sha256sum ~/.codex/config.toml 2>/dev/null || true
+# run the codex-shim codex -- ... command above
+sha256sum ~/.codex/config.toml 2>/dev/null || true
+```
+
+If `~/.codex/config.toml` does not exist, both commands may print nothing; the
+safe wrapper should not create it.
+
+Stop the local shim when done:
+
+```bash
+codex-shim --port 8767 stop
 ```
 
 ---
@@ -380,6 +485,7 @@ codex-shim app [path]       install managed config and launch Codex Desktop
 codex-app [path]            shortcut for `codex-shim app`
 codex-model [list|<slug>]   shortcut for `codex-shim model …`
 codex-openrouter [args]     shortcut for the safe OpenRouter CLI workflow
+codex-minimax [args]        shortcut for the safe MiniMax Token Plan workflow
 ```
 
 All commands accept `--settings <path>` and `--port <port>`.
@@ -394,6 +500,7 @@ bin/codex-shim          main entrypoint
 bin/codex-app           shortcut wrapping `codex-shim app`
 bin/codex-model         shortcut wrapping `codex-shim model …`
 bin/codex-openrouter    shortcut for the safe OpenRouter CLI workflow
+bin/codex-minimax       shortcut for the safe MiniMax Token Plan workflow
 .codex-shim/            generated catalog, config, logs, pid (gitignored)
 tests/                  pytest suite
 ```

@@ -279,7 +279,10 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
         item_type = item.get("type")
         if item_type in {"message", None} and "role" in item:
             flush_pending_assistant_tool_calls()
-            messages.append({"role": item.get("role", "user"), "content": _content_to_text(item.get("content", ""))})
+            role = item.get("role", "user")
+            if role == "developer":
+                role = "system"
+            messages.append({"role": role, "content": _content_to_text(item.get("content", ""))})
         elif item_type in {"input_text", "text"}:
             flush_pending_assistant_tool_calls()
             messages.append({"role": "user", "content": _content_to_text(item)})
