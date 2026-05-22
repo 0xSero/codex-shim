@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+SETTINGS="${CODEX_SHIM_SETTINGS:-$ROOT/.codex-shim/minimax-settings.json}"
+PORT="${CODEX_SHIM_PORT:-8767}"
+PLACEHOLDER_KEY="REPLACE_WITH_MINIMAX_TOKEN_PLAN_KEY"
+DEFAULT_MODEL="MiniMax-M2.7"
+DEFAULT_DISPLAY_NAME="MiniMax M2.7"
+DEFAULT_BASE_URL="https://api.minimax.io/v1"
+DEFAULT_CONTEXT="1000000"
+COMMAND="${1:-run}"
+if [ "$COMMAND" = "setup" ] || [ "$COMMAND" = "--configure" ] || [ "$COMMAND" = "configure" ]; then
+  shift
+  CONFIGURE_ONLY=1
+else
+  CONFIGURE_ONLY=0
+fi
+
+settings_status() {
+  python3 - "$SETTINGS" "$PLACEHOLDER_KEY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+placeholder = sys.argv[2]
+if not path.exists():
+    print("missing")
+    raise SystemExit(0)
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    print("invalid_json")
+    raise SystemExit(0)
+models = data.get("customModels")
+if not isinstance(models, list) or not models:
+    print("empty")
+    raise SystemExit(0)
+row = models[0] if isinstance(models[0], dict) else {}
+if not str(row.get("model") or "").strip():
+    print("missing_model")
+    raise SystemExit(0)
+if str(row.get("provider") or "").strip() not in {"minimax", "generic-chat-completion-api", "openai"}:
+    print("unsupported_provider")
+    raise SystemExit(0)
+if not str(row.get("baseUrl") or "").strip():
+    print("missing_base_url")
+    raise SystemExit(0)
+api_key = str(row.get("apiKey") or "").strip()
+if not api_key or api_key == placeholder:
+    print("missing_key")
+    raise SystemExit(0)
+print("ok")
+PY
+}
+
+current_settings() {
+  python3 - "$SETTINGS" "$DEFAULT_MODEL" "$DEFAULT_DISPLAY_NAME" "$DEFAULT_BASE_URL" "$DEFAULT_CONTEXT" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+defaults = {
+    "model": sys.argv[2],
+    "displayName": sys.argv[3],
+    "baseUrl": sys.argv[4],
+    "maxContextLimit": sys.argv[5],
+}
+row = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text())
+        models = data.get("customModels") or []
+        if models and isinstance(models[0], dict):
+            row = models[0]
+    except Exception:
+        row = {}
+for key, fallback in [
+    ("apiKey", ""),
+    ("model", defaults["model"]),
+    ("displayName", defaults["displayName"]),
+    ("baseUrl", defaults["baseUrl"]),
+    ("maxContextLimit", defaults["maxContextLimit"]),
+]:
+    print(f"{key}={shlex.quote(str(row.get(key) or fallback))}")
+PY
+}
+
+prompt_setup() {
+  local status="$1"
+  if [ ! -t 0 ]; then
+    cat >&2 <<EOF
+MiniMax Token Plan settings are not configured ($status):
+  $SETTINGS
+
+Run this helper from an interactive terminal, or create the file manually from:
+  $ROOT/examples/minimax-token-plan-settings.example.json
+EOF
+    exit 1
+  fi
+
+  if [ "$status" = "ok" ]; then
+    cat >&2 <<EOF
+MiniMax setup:
+  $SETTINGS
+
+This will update the local ignored settings file. The API key will not be echoed.
+EOF
+  else
+    cat >&2 <<EOF
+MiniMax Token Plan settings need configuration ($status):
+  $SETTINGS
+
+This will write a local ignored settings file. The API key will not be echoed.
+EOF
+  fi
+
+  local api_key model display_name base_url context current_key current_model current_displayName current_baseUrl current_maxContextLimit
+  eval "$(current_settings)"
+  current_key="$apiKey"
+  current_model="$model"
+  current_displayName="$displayName"
+  current_baseUrl="$baseUrl"
+  current_maxContextLimit="$maxContextLimit"
+
+  local key_prompt="MiniMax Token Plan API key"
+  if [ -n "$current_key" ] && [ "$current_key" != "$PLACEHOLDER_KEY" ]; then
+    key_prompt="MiniMax Token Plan API key [keep existing]"
+  fi
+  read -r -s -p "$key_prompt: " api_key
+  printf '\n' >&2
+  if [ -z "$api_key" ] && [ -n "$current_key" ] && [ "$current_key" != "$PLACEHOLDER_KEY" ]; then
+    api_key="$current_key"
+  fi
+  if [ -z "$api_key" ]; then
+    echo "API key is required." >&2
+    exit 1
+  fi
+  read -r -p "MiniMax model [$current_model]: " model
+  model="${model:-$current_model}"
+  read -r -p "Display name [$current_displayName]: " display_name
+  display_name="${display_name:-$current_displayName}"
+  read -r -p "Base URL [$current_baseUrl]: " base_url
+  base_url="${base_url:-$current_baseUrl}"
+  read -r -p "Max context tokens [$current_maxContextLimit]: " context
+  context="${context:-$current_maxContextLimit}"
+
+  mkdir -p "$(dirname "$SETTINGS")"
+  chmod 700 "$(dirname "$SETTINGS")" 2>/dev/null || true
+  umask 077
+  python3 - "$SETTINGS" "$api_key" "$model" "$display_name" "$base_url" "$context" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+api_key = sys.argv[2]
+model = sys.argv[3]
+display_name = sys.argv[4]
+base_url = sys.argv[5].rstrip("/")
+try:
+    context = int(sys.argv[6])
+except ValueError:
+    context = 1000000
+
+payload = {
+    "customModels": [
+        {
+            "model": model,
+            "provider": "minimax",
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "displayName": display_name,
+            "maxContextLimit": context,
+        }
+    ]
+}
+path.write_text(json.dumps(payload, indent=2) + "\n")
+PY
+  echo "Wrote $SETTINGS" >&2
+}
+
+STATUS="$(settings_status)"
+if [ "$CONFIGURE_ONLY" = "1" ]; then
+  prompt_setup "$STATUS"
+  STATUS="$(settings_status)"
+  if [ "$STATUS" != "ok" ]; then
+    echo "MiniMax settings are still not usable: $STATUS" >&2
+    exit 1
+  fi
+  echo "MiniMax settings configured. Run: bin/codex-minimax ." >&2
+  exit 0
+fi
+
+if [ "$STATUS" != "ok" ]; then
+  prompt_setup "$STATUS"
+  STATUS="$(settings_status)"
+fi
+if [ "$STATUS" != "ok" ]; then
+  echo "MiniMax settings are still not usable: $STATUS" >&2
+  exit 1
+fi
+
+export CODEX_SHIM_DISABLE_CHATGPT="${CODEX_SHIM_DISABLE_CHATGPT:-1}"
+
+if [ -n "${CODEX_SHIM_MODEL:-}" ]; then
+  MODEL="$CODEX_SHIM_MODEL"
+else
+  MODEL="$("$ROOT/bin/codex-shim" --settings "$SETTINGS" list | awk 'NR == 1 { print $1 }')"
+fi
+
+if [ -z "$MODEL" ]; then
+  echo "No model slug found in $SETTINGS." >&2
+  exit 1
+fi
+
+"$ROOT/bin/codex-shim" --settings "$SETTINGS" --port "$PORT" start >/dev/null
+
+exec "$ROOT/bin/codex-shim" \
+  --settings "$SETTINGS" \
+  --port "$PORT" \
+  codex -- -m "$MODEL" "$@"
