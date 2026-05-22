@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import signal
@@ -11,7 +12,15 @@ import hashlib
 from urllib.request import urlopen
 
 from .catalog import codex_config_overrides, write_catalog, write_config
-from .settings import DEFAULT_FACTORY_SETTINGS, DEFAULT_HOST, DEFAULT_PORT, FactorySettings, default_model_slug
+from .settings import (
+    CHATGPT_MODEL_SLUG,
+    DEFAULT_FACTORY_SETTINGS,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    FactorySettings,
+    chatgpt_passthrough_enabled,
+    default_model_slug,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +33,8 @@ CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 CODEX_CONFIG_BACKUP_PATH = RUNTIME_DIR / "config.toml.before-codex-shim"
 MANAGED_BEGIN = "# >>> codex-shim managed >>>"
 MANAGED_END = "# <<< codex-shim managed <<<"
+PREVIOUS_TOP_LEVEL_PREFIX = "# codex-shim previous-top-level = "
+MANAGED_TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,12 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("generate")
     sub.add_parser("list")
     sub.add_parser("start")
-    sub.add_parser("enable")
+    sub.add_parser("enable", help="Install managed shim blocks into ~/.codex/config.toml and start the shim.")
     sub.add_parser("stop")
     sub.add_parser("disable")
     sub.add_parser("restart")
     sub.add_parser("status")
-    sub.add_parser("patch-app", help="Patch Codex Desktop model dropdown to allow custom catalog models.")
+    sub.add_parser("patch-app", help="Experimental/incomplete: patch Codex Desktop ASAR model picker.")
     sub.add_parser("restore-app", help="Restore Codex Desktop app.asar from the pre-patch backup.")
 
     model_parser = sub.add_parser("model", help="List or set the active shim model in Codex config.")
@@ -51,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     codex_parser = sub.add_parser("codex", help="Run Codex CLI with opt-in shim config overrides.")
     codex_parser.add_argument("args", nargs=argparse.REMAINDER)
 
-    app_parser = sub.add_parser("app", help="Launch Codex Desktop with opt-in shim config overrides.")
+    app_parser = sub.add_parser("app", help="Install managed shim config blocks, then launch Codex Desktop.")
     app_parser.add_argument("-m", "--model", dest="model_slug")
     app_parser.add_argument("path", nargs="?", default=".")
 
@@ -106,8 +117,13 @@ def main(argv: list[str] | None = None) -> int:
 
 def generate(settings_path: Path, port: int) -> None:
     models = FactorySettings(settings_path).load()
-    write_catalog(models, CATALOG_PATH)
-    write_config(models, CONFIG_PATH, CATALOG_PATH, port)
+    include_chatgpt = chatgpt_passthrough_enabled()
+    try:
+        default_model_slug(models, include_chatgpt)
+        write_catalog(models, CATALOG_PATH, include_chatgpt)
+        write_config(models, CONFIG_PATH, CATALOG_PATH, port, include_chatgpt)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"Generated {len(models)} model entries:")
     print(f"  catalog: {CATALOG_PATH}")
     print(f"  config:  {CONFIG_PATH}")
@@ -120,15 +136,19 @@ def install_codex_config(settings_path: Path, port: int, model_slug: str | None 
     CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     original = CODEX_CONFIG_PATH.read_text() if CODEX_CONFIG_PATH.exists() else ""
-    if MANAGED_BEGIN not in original and not CODEX_CONFIG_BACKUP_PATH.exists():
-        CODEX_CONFIG_BACKUP_PATH.write_text(original)
     cleaned = _remove_managed_config(original)
-    cleaned = _remove_top_level_keys(cleaned, {"model", "model_provider", "model_catalog_json"})
+    current_top_level = _extract_top_level_key_lines(cleaned, MANAGED_TOP_LEVEL_KEYS)
+    if current_top_level:
+        previous_top_level = current_top_level
+    elif MANAGED_BEGIN in original:
+        previous_top_level = _managed_previous_top_level(original)
+    else:
+        previous_top_level = _extract_top_level_key_lines(original, MANAGED_TOP_LEVEL_KEYS)
+    cleaned = _remove_top_level_keys(cleaned, MANAGED_TOP_LEVEL_KEYS)
     cleaned = _remove_section(cleaned, "model_providers.factory_byok_shim")
-    top_block, provider_block = _managed_config_blocks(default_slug, port)
+    top_block, provider_block = _managed_config_blocks(default_slug, port, previous_top_level)
     CODEX_CONFIG_PATH.write_text(top_block + "\n" + cleaned.lstrip() + "\n" + provider_block)
     print(f"Installed shim config into {CODEX_CONFIG_PATH}.")
-    print(f"Original backup: {CODEX_CONFIG_BACKUP_PATH}")
 
 
 def list_models(settings_path: Path) -> int:
@@ -191,17 +211,17 @@ def stop() -> int:
 
 
 def restore_codex_config() -> None:
-    if CODEX_CONFIG_BACKUP_PATH.exists():
-        CODEX_CONFIG_PATH.write_text(CODEX_CONFIG_BACKUP_PATH.read_text())
-        CODEX_CONFIG_BACKUP_PATH.unlink()
-        print(f"Restored original {CODEX_CONFIG_PATH}.")
-        return
     if CODEX_CONFIG_PATH.exists():
         current = CODEX_CONFIG_PATH.read_text()
+        previous_top_level = _managed_previous_top_level(current)
         restored = _remove_managed_config(current)
         restored = _remove_section(restored, "model_providers.factory_byok_shim")
-        CODEX_CONFIG_PATH.write_text(restored.lstrip())
+        restored = _restore_missing_top_level_keys(restored.lstrip(), previous_top_level)
+        CODEX_CONFIG_PATH.write_text(restored)
         print(f"Removed shim config from {CODEX_CONFIG_PATH}.")
+    if CODEX_CONFIG_BACKUP_PATH.exists():
+        CODEX_CONFIG_BACKUP_PATH.unlink()
+        print(f"Removed stale shim backup {CODEX_CONFIG_BACKUP_PATH}.")
 
 
 def status(port: int) -> int:
@@ -379,9 +399,12 @@ end tell
         pass
 
 
-def _managed_config_blocks(default_slug: str, port: int) -> tuple[str, str]:
+def _managed_config_blocks(default_slug: str, port: int, previous_top_level: dict[str, str] | None = None) -> tuple[str, str]:
+    metadata = ""
+    if previous_top_level:
+        metadata = PREVIOUS_TOP_LEVEL_PREFIX + json.dumps(previous_top_level, sort_keys=True) + "\n"
     top_block = f'''{MANAGED_BEGIN}
-model = "{default_slug}"
+{metadata}model = "{default_slug}"
 model_provider = "factory_byok_shim"
 model_catalog_json = "{CATALOG_PATH}"
 {MANAGED_END}
@@ -426,6 +449,59 @@ def _remove_top_level_keys(text: str, keys: set[str]) -> str:
     return "\n".join(output) + ("\n" if text.endswith("\n") else "")
 
 
+def _extract_top_level_key_lines(text: str, keys: set[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    in_top_level = True
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_top_level = False
+        if not in_top_level or not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in keys:
+            found[key] = line
+    return found
+
+
+def _managed_previous_top_level(text: str) -> dict[str, str]:
+    in_managed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == MANAGED_BEGIN:
+            in_managed = True
+            continue
+        if stripped == MANAGED_END:
+            in_managed = False
+            continue
+        if in_managed and stripped.startswith(PREVIOUS_TOP_LEVEL_PREFIX):
+            encoded = stripped[len(PREVIOUS_TOP_LEVEL_PREFIX) :]
+            try:
+                payload = json.loads(encoded)
+            except json.JSONDecodeError:
+                return {}
+            if isinstance(payload, dict):
+                return {str(k): str(v) for k, v in payload.items() if k in MANAGED_TOP_LEVEL_KEYS}
+    return {}
+
+
+def _restore_missing_top_level_keys(text: str, previous_top_level: dict[str, str]) -> str:
+    if not previous_top_level:
+        return text
+    current = _extract_top_level_key_lines(text, MANAGED_TOP_LEVEL_KEYS)
+    lines = [
+        previous_top_level[key]
+        for key in ("model", "model_provider", "model_catalog_json")
+        if key in previous_top_level and key not in current
+    ]
+    if not lines:
+        return text
+    prefix = "\n".join(lines) + "\n"
+    if text and not text.startswith("\n"):
+        return prefix + text
+    return prefix + text.lstrip()
+
+
 def _remove_section(text: str, section: str) -> str:
     lines = text.splitlines()
     output: list[str] = []
@@ -454,7 +530,11 @@ def _override_args(settings_path: Path, port: int) -> list[str]:
 
 def _resolve_model_slug(models, requested: str | None) -> str:
     if requested is None:
-        return _current_managed_model() or default_model_slug(models)
+        current = _current_managed_model()
+        valid = _valid_model_slugs(models)
+        if current in valid:
+            return current
+        return default_model_slug(models)
     by_slug = {model.slug: model.slug for model in models}
     by_model = {}
     for model in models:
@@ -474,11 +554,25 @@ def _resolve_model_slug(models, requested: str | None) -> str:
 def _current_managed_model() -> str | None:
     if not CODEX_CONFIG_PATH.exists():
         return None
+    in_managed = False
     for line in CODEX_CONFIG_PATH.read_text().splitlines():
         stripped = line.strip()
-        if stripped.startswith("model = "):
+        if stripped == MANAGED_BEGIN:
+            in_managed = True
+            continue
+        if stripped == MANAGED_END:
+            in_managed = False
+            continue
+        if in_managed and stripped.startswith("model = "):
             return stripped.split("=", 1)[1].strip().strip('"')
     return None
+
+
+def _valid_model_slugs(models) -> set[str]:
+    slugs = {model.slug for model in models}
+    if chatgpt_passthrough_enabled():
+        slugs.add(CHATGPT_MODEL_SLUG)
+    return slugs
 
 
 def _healthy(port: int) -> bool:
