@@ -142,6 +142,106 @@ Supported `provider` values:
 
 ---
 
+## OpenRouter actual-test path
+
+Factory is only the JSON shape this shim already understands. You do not need
+Factory.ai to test the shim: any OpenAI-compatible chat-completions provider can
+be listed in `customModels`. OpenRouter works with
+`baseUrl = "https://openrouter.ai/api/v1"` and provider
+`generic-chat-completion-api`.
+
+Start from the committed-safe template, then keep the real API key in the
+ignored `.codex-shim/` runtime directory:
+
+```bash
+mkdir -p .codex-shim
+cp examples/openrouter-settings.example.json .codex-shim/openrouter-settings.json
+$EDITOR .codex-shim/openrouter-settings.json
+```
+
+In `.codex-shim/openrouter-settings.json`, replace
+`REPLACE_WITH_OPENROUTER_API_KEY` with your OpenRouter key. You can also change
+`model` to any OpenRouter model id, and `displayName` to the name you want
+Codex to show. Do not commit this local file.
+
+Generate, list, and start a shim instance on port `8766` with ChatGPT
+passthrough disabled so the test uses only OpenRouter:
+
+```bash
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/openrouter-settings.json \
+  --port 8766 \
+  generate
+
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/openrouter-settings.json \
+  list
+
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/openrouter-settings.json \
+  --port 8766 \
+  start
+```
+
+`list` prints the shim slug in the first column. With the example unchanged it
+is usually `openai-gpt-4o-mini`. Run Codex through the safe wrapper with that
+slug, replacing it if your `list` output differs:
+
+```bash
+CODEX_SHIM_DISABLE_CHATGPT=1 codex-shim \
+  --settings .codex-shim/openrouter-settings.json \
+  --port 8766 \
+  codex -- -m openai-gpt-4o-mini .
+```
+
+For the usual local OpenRouter workflow, the `codex-openrouter` helper does
+those steps for you: it uses `.codex-shim/openrouter-settings.json`, disables
+ChatGPT passthrough, starts the shim on port `8766`, detects the first listed
+slug, and runs Codex through the safe wrapper. On first run, if the settings
+file is missing, empty, or still has the placeholder API key, it prompts for
+your OpenRouter key and model and writes the ignored local settings file.
+
+```bash
+bin/codex-openrouter .
+```
+
+To change the stored OpenRouter model or key later:
+
+```bash
+bin/codex-openrouter setup
+```
+
+The setup prompt shows current values and lets Enter keep them. The API key is
+not echoed; pressing Enter keeps the existing key when one is already present.
+
+Optional overrides:
+
+```bash
+CODEX_SHIM_MODEL=openrouter-owl-alpha bin/codex-openrouter .
+CODEX_SHIM_PORT=8770 bin/codex-openrouter .
+CODEX_SHIM_SETTINGS=/path/to/openrouter-settings.json bin/codex-openrouter .
+```
+
+That command uses temporary inline `-c` overrides only. To verify your normal
+Codex config was not touched, compare the file before and after:
+
+```bash
+sha256sum ~/.codex/config.toml 2>/dev/null || true
+# run the codex-shim codex -- ... command above
+sha256sum ~/.codex/config.toml 2>/dev/null || true
+```
+
+If `~/.codex/config.toml` does not exist, both commands may print nothing; the
+safe wrapper should not create it.
+
+Stop the local shim when done:
+
+```bash
+codex-shim --port 8766 stop
+```
+
+---
+
 ## Picker patch for Codex Desktop on macOS
 
 Codex Desktop has a Statsig server-side allowlist (`use_hidden_models: true`)
@@ -279,6 +379,7 @@ codex-shim app [path]       install managed config and launch Codex Desktop
 
 codex-app [path]            shortcut for `codex-shim app`
 codex-model [list|<slug>]   shortcut for `codex-shim model …`
+codex-openrouter [args]     shortcut for the safe OpenRouter CLI workflow
 ```
 
 All commands accept `--settings <path>` and `--port <port>`.
@@ -292,6 +393,7 @@ codex_shim/             python source (server + cli + translation)
 bin/codex-shim          main entrypoint
 bin/codex-app           shortcut wrapping `codex-shim app`
 bin/codex-model         shortcut wrapping `codex-shim model …`
+bin/codex-openrouter    shortcut for the safe OpenRouter CLI workflow
 .codex-shim/            generated catalog, config, logs, pid (gitignored)
 tests/                  pytest suite
 ```
