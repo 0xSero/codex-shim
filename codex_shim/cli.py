@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import hashlib
+import re
 from urllib.request import urlopen
 
 IS_WINDOWS = sys.platform == "win32"
@@ -27,6 +28,9 @@ CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 CODEX_CONFIG_BACKUP_PATH = RUNTIME_DIR / "config.toml.before-codex-shim"
 MANAGED_BEGIN = "# >>> codex-shim managed >>>"
 MANAGED_END = "# <<< codex-shim managed <<<"
+PATCHED_CODEX_APP_DIR = RUNTIME_DIR / "codex-desktop-patched" / "app"
+PATCHED_CODEX_ROOT = RUNTIME_DIR / "codex-desktop-patched"
+PATCHED_CODEX_POINTER = RUNTIME_DIR / "patched-app-path.txt"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,6 +150,8 @@ def start(settings_path: Path, port: int) -> int:
     if _pid_running(_read_pid()):
         print(f"Shim already running with pid {_read_pid()}.")
         return 0
+    if not _server_runtime_ready():
+        return 1
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -160,27 +166,30 @@ def start(settings_path: Path, port: int) -> int:
     ]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-    popen_kwargs = {}
+    log = LOG_PATH.open("ab")
+    popen_kwargs: dict = {
+        "stdout": log,
+        "stderr": log,
+    }
     if IS_WINDOWS:
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         popen_kwargs["close_fds"] = True
     else:
-        log = LOG_PATH.open("ab")
         popen_kwargs["start_new_session"] = True
-        popen_kwargs["stdout"] = log
-        popen_kwargs["stderr"] = log
     process = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=env, stdin=subprocess.DEVNULL, **popen_kwargs)
     PID_PATH.write_text(str(process.pid))
     for _ in range(50):
+        if process.poll() is not None:
+            print(f"Shim exited during startup. See {LOG_PATH}.", file=sys.stderr)
+            _print_log_tail()
+            return 1
         if _healthy(port):
             print(f"Shim started on http://{DEFAULT_HOST}:{port} with pid {process.pid}.")
             print(f"Log: {LOG_PATH}")
             return 0
-        if process.poll() is not None:
-            print(f"Shim exited during startup. See {LOG_PATH}.", file=sys.stderr)
-            return 1
         time.sleep(0.1)
     print(f"Shim process started but health check timed out. See {LOG_PATH}.", file=sys.stderr)
+    _print_log_tail()
     return 1
 
 
@@ -190,16 +199,7 @@ def stop() -> int:
         print("Shim is not running.")
         PID_PATH.unlink(missing_ok=True)
         return 0
-    if IS_WINDOWS:
-        import ctypes
-        PROCESS_TERMINATE = 0x0001
-        SYNCHRONIZE = 0x100000
-        handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, False, pid)
-        if handle:
-            ctypes.windll.kernel32.TerminateProcess(handle, 1)
-            ctypes.windll.kernel32.CloseHandle(handle)
-    else:
-        os.kill(pid, signal.SIGTERM)
+    _terminate_pid(pid)
     for _ in range(50):
         if not _pid_running(pid):
             PID_PATH.unlink(missing_ok=True)
@@ -226,11 +226,26 @@ def restore_codex_config() -> None:
 
 def status(port: int) -> int:
     pid = _read_pid()
-    if _pid_running(pid) and _healthy(port):
+    healthy = _healthy(port)
+    if _pid_running(pid) and not healthy:
+        time.sleep(0.5)
+        healthy = _healthy(port)
+    if healthy and not _pid_running(pid):
+        print(
+            f"http://{DEFAULT_HOST}:{port}/health is up but shim pid {pid} is not running. "
+            "Another process may own the port. Run: codex-shim stop",
+            file=sys.stderr,
+        )
+        return 1
+    if _pid_running(pid) and healthy:
         print(f"Shim is running on http://{DEFAULT_HOST}:{port} with pid {pid}.")
         return 0
     if _pid_running(pid):
-        print(f"Shim process {pid} exists but health check failed.")
+        print(f"Shim process {pid} exists but health check failed. See {LOG_PATH}.", file=sys.stderr)
+        _print_log_tail()
+        return 1
+    if healthy:
+        print(f"Shim is stopped but http://{DEFAULT_HOST}:{port}/health responded.")
         return 1
     print("Shim is stopped.")
     return 1
@@ -254,13 +269,55 @@ def exec_codex(settings_path: Path, port: int, codex_args: list[str]) -> None:
 
 def exec_codex_app(settings_path: Path, port: int, path: str) -> None:
     _quit_codex_app()
+    patched_exe = _patched_codex_exe()
+    if IS_WINDOWS and patched_exe is not None:
+        os.startfile(str(patched_exe))
+        return
+    if IS_WINDOWS:
+        print(
+            f"Patched Codex Desktop not found at {_active_patched_app_dir()}. "
+            "Run: codex-shim patch-app",
+            file=sys.stderr,
+        )
     args = ["codex", "app", path]
     subprocess.Popen(args)
     _foreground_codex_app()
 
 
+def _active_patched_app_dir() -> Path:
+    if PATCHED_CODEX_POINTER.exists():
+        recorded = Path(PATCHED_CODEX_POINTER.read_text().strip())
+        if recorded.exists():
+            return recorded
+    return PATCHED_CODEX_APP_DIR
+
+
+def _set_active_patched_app_dir(app_dir: Path) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    PATCHED_CODEX_POINTER.write_text(str(app_dir.resolve()))
+
+
+def _patched_codex_exe() -> Path | None:
+    exe = _active_patched_app_dir() / "Codex.exe"
+    return exe if exe.exists() else None
+
+
+def _patched_install_roots() -> list[Path]:
+    roots = sorted(RUNTIME_DIR.glob("codex-desktop-patched*"), key=lambda p: p.name)
+    return [p for p in roots if p.is_dir()]
+
+
 def _quit_codex_app() -> None:
     if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/IM", "Codex.exe", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for root in _patched_install_roots():
+            _kill_windows_processes_under(root)
+        time.sleep(1.0)
         return
     script = 'tell application "Codex" to if it is running then quit'
     try:
@@ -300,7 +357,6 @@ def patch_codex_app() -> int:
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
 
-    npx_cmd = "npx.cmd" if IS_WINDOWS else "npx"
     subprocess.run([npx_cmd, "--yes", "asar", "extract", str(app_asar), str(workdir)], check=True)
     bundle_file = _find_model_queries_bundle(workdir, needle, replacement)
     if bundle_file is None:
@@ -319,16 +375,9 @@ def patch_codex_app() -> int:
         return 1
 
     if IS_WINDOWS:
-        # On Windows the app is distributed via MSIX under a read-only
-        # WindowsApps directory.  Copy the whole app tree to a writable
-        # location, repack the patched asar there, and patch the executable so
-        # the new asar passes the embedded integrity hash check.
-        patched_dir = RUNTIME_DIR / "codex-desktop-patched" / "app"
+        patched_dir = _prepare_patched_app_dir(app_dir)
         patched_asar = patched_dir / "resources" / "app.asar"
         patched_exe = patched_dir / "Codex.exe"
-        if patched_dir.exists():
-            shutil.rmtree(patched_dir)
-        shutil.copytree(app_dir, patched_dir, symlinks=False)
         subprocess.run([npx_cmd, "--yes", "asar", "pack", str(workdir), str(patched_asar)], check=True)
         _patch_asar_integrity_bypass(patched_exe, _app_asar_hash(app_asar), _app_asar_hash(patched_asar))
         print(f"Patched Codex Desktop copied to: {patched_dir}")
@@ -340,18 +389,107 @@ def patch_codex_app() -> int:
     return 0
 
 
+def _terminate_pid(pid: int) -> None:
+    if IS_WINDOWS:
+        import ctypes
+
+        access = 0x100000 | 0x0001
+        handle = ctypes.windll.kernel32.OpenProcess(access, False, pid)
+        if handle:
+            ctypes.windll.kernel32.TerminateProcess(handle, 1)
+            ctypes.windll.kernel32.CloseHandle(handle)
+    else:
+        os.kill(pid, signal.SIGTERM)
+
+
+def _kill_windows_processes_under(root: Path) -> None:
+    root_ps = str(root.resolve()).replace("'", "''")
+    script = (
+        f"$root = '{root_ps}'; "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root) } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _remove_tree_retry(root: Path) -> bool:
+    if not root.exists():
+        return True
+    for _ in range(8):
+        try:
+            shutil.rmtree(root)
+            return True
+        except PermissionError:
+            if IS_WINDOWS:
+                _kill_windows_processes_under(root)
+                subprocess.run(
+                    ["taskkill", "/IM", "Codex.exe", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            time.sleep(0.5)
+    return False
+
+
+def _prepare_patched_app_dir(app_dir: Path) -> Path:
+    candidates = [PATCHED_CODEX_APP_DIR] + [
+        RUNTIME_DIR / f"codex-desktop-patched-{index}" / "app" for index in range(2, 20)
+    ]
+    locked: list[Path] = []
+    for patched_dir in candidates:
+        root = patched_dir.parent
+        if root.exists() and not _remove_tree_retry(root):
+            locked.append(root)
+            continue
+        root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(app_dir, patched_dir, symlinks=False)
+        _set_active_patched_app_dir(patched_dir)
+        if locked:
+            print(
+                "Previous patched copy is still in use and was left on disk: "
+                + ", ".join(str(path) for path in locked),
+            )
+        return patched_dir
+    raise SystemExit(
+        "Could not create a patched Codex copy because existing patched folders are locked. "
+        "Close Codex Desktop and retry."
+    )
+
+
 def restore_codex_app_bundle() -> int:
-    app_asar, app_dir = _find_codex_app_bundle()
-    if app_asar is None:
-        print("Codex Desktop app bundle not found.", file=sys.stderr)
-        return 1
-    backup = RUNTIME_DIR / "app.asar.before-codex-shim-model-picker-patch"
-    if not backup.exists():
-        print(f"No app.asar backup found at {backup}.")
-        return 0
     _quit_codex_app()
-    app_asar.write_bytes(backup.read_bytes())
-    print(f"Restored {app_asar} from {backup}.")
+    time.sleep(1.0)
+    if IS_WINDOWS:
+        roots = _patched_install_roots()
+        if not roots:
+            print("No patched Codex Desktop copy found.")
+        else:
+            for root in roots:
+                if _remove_tree_retry(root):
+                    print(f"Removed patched Codex Desktop copy at {root}.")
+                else:
+                    print(f"Could not remove {root} (files still in use).", file=sys.stderr)
+        PATCHED_CODEX_POINTER.unlink(missing_ok=True)
+    else:
+        app_asar, app_dir = _find_codex_app_bundle()
+        if app_asar is None:
+            print("Codex Desktop app bundle not found.", file=sys.stderr)
+            return 1
+        backup = RUNTIME_DIR / "app.asar.before-codex-shim-model-picker-patch"
+        if not backup.exists():
+            print(f"No app.asar backup found at {backup}.")
+        else:
+            app_asar.write_bytes(backup.read_bytes())
+            print(f"Restored {app_asar} from {backup}.")
+    restore_codex_config()
+    print("Run: codex-shim stop — then launch Codex from the Start menu.")
     return 0
 
 
@@ -388,9 +526,6 @@ def _find_model_queries_bundle(workdir: Path, needle: str, replacement: str) -> 
 def _find_codex_app_bundle() -> tuple[Path | None, Path | None]:
     """Return (app.asar path, app root directory) for Codex Desktop."""
     if IS_WINDOWS:
-        # MSIX install under WindowsApps (read-only).  We often cannot list the
-        # directory without elevation, so try a glob first and fall back to
-        # PowerShell's Get-AppxPackage if that fails.
         windows_apps = Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "WindowsApps"
         if windows_apps.exists():
             try:
@@ -402,39 +537,32 @@ def _find_codex_app_bundle() -> tuple[Path | None, Path | None]:
                             return asar, app_dir
             except PermissionError:
                 pass
-            # Glob fallback when iterdir is blocked
             for entry in sorted(windows_apps.glob("OpenAI.Codex_*/app")):
                 asar = entry / "resources" / "app.asar"
                 if asar.exists():
                     return asar, entry
-            # PowerShell fallback
-            try:
-                result = subprocess.run(
-                    [
-                        "powershell",
-                        "-NoProfile",
-                        "-Command",
-                        "(Get-AppxPackage -Name OpenAI.Codex).InstallLocation",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                install_location = result.stdout.strip()
-                if install_location:
-                    app_dir = Path(install_location) / "app"
-                    asar = app_dir / "resources" / "app.asar"
-                    if asar.exists():
-                        return asar, app_dir
-            except Exception:
-                pass
-        # Fallback: look in Local\Programs
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-AppxPackage -Name OpenAI.Codex).InstallLocation",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            install_location = result.stdout.strip()
+            if install_location:
+                app_dir = Path(install_location) / "app"
+                asar = app_dir / "resources" / "app.asar"
+                if asar.exists():
+                    return asar, app_dir
         local_programs = Path.home() / "AppData" / "Local" / "Programs" / "Codex"
         asar = local_programs / "resources" / "app.asar"
         if asar.exists():
             return asar, local_programs
         return None, None
-    # macOS
     app_dir = Path("/Applications/Codex.app")
     asar = app_dir / "Contents" / "Resources" / "app.asar"
     if asar.exists():
@@ -454,9 +582,6 @@ def _resign_codex_app() -> None:
 
 
 def _patch_asar_integrity_bypass(exe_path: Path, old_hash: str, new_hash: str) -> None:
-    """Replace the embedded SHA256 of app.asar inside the Electron exe."""
-    import re
-
     if not exe_path.exists():
         print(f"Codex executable not found at {exe_path}; skipping integrity bypass.", file=sys.stderr)
         return
@@ -468,14 +593,10 @@ def _patch_asar_integrity_bypass(exe_path: Path, old_hash: str, new_hash: str) -
         exe_path.write_bytes(exe_bytes)
         print("Bypassed ASAR integrity check in Codex.exe.")
         return
-    # When the WindowsApps source has been auto-updated the hash stored in the
-    # exe may not match the current app.asar.  Scan the exe for any 64-char hex
-    # string that is not an obvious test vector and replace it.
     for match in re.finditer(b"[a-f0-9]{64}", exe_bytes):
         candidate = match.group()
         if _looks_like_test_vector(candidate):
             continue
-        # Found a likely real hash — replace it
         exe_bytes = exe_bytes.replace(candidate, new_hash_bytes)
         exe_path.write_bytes(exe_bytes)
         print("Bypassed ASAR integrity check in Codex.exe (auto-detected hash).")
@@ -484,27 +605,18 @@ def _patch_asar_integrity_bypass(exe_path: Path, old_hash: str, new_hash: str) -
 
 
 def _looks_like_test_vector(candidate: bytes) -> bool:
-    """Detect sequential / lookup-table hex strings embedded in binaries."""
     if candidate.startswith(b"0123456789abcdef"):
         return True
-    # Test vectors often encode byte sequences as hex pairs: 00 01 02 03 …
     try:
         chunks = [int(candidate[i : i + 2], 16) for i in range(0, 64, 2)]
     except ValueError:
         return True
     if len(chunks) != 32:
         return True
-    # Sequential byte table (e.g. 0x00,0x01… or 0x20,0x21…)
     if all(chunks[i + 1] - chunks[i] == 1 for i in range(len(chunks) - 1)):
         return True
-    # Repeating-nibble lookup tables (e.g. 00 01 02 03 … in ASCII nibble form)
-    if all(chunks[i + 1] - chunks[i] == 1 for i in range(15)) and chunks[0] in (0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240):
-        return True
-    # Check for repeating nibble patterns (e.g. 0000000100100011…)
     raw = bytes.fromhex(candidate.decode("ascii"))
-    if all(b in (0, 1) for b in raw):
-        return True
-    return False
+    return all(b in (0, 1) for b in raw)
 
 
 def _foreground_codex_app() -> None:
@@ -638,6 +750,30 @@ def _current_managed_model() -> str | None:
     return None
 
 
+def _server_runtime_ready() -> bool:
+    try:
+        import aiohttp  # noqa: F401
+    except ImportError:
+        print(f"aiohttp is not installed for {sys.executable}.", file=sys.stderr)
+        print(f"  {sys.executable} -m pip install aiohttp", file=sys.stderr)
+        return False
+    return True
+
+
+def _print_log_tail(lines: int = 30) -> None:
+    if not LOG_PATH.exists():
+        return
+    try:
+        tail = LOG_PATH.read_text(errors="replace").splitlines()[-lines:]
+    except OSError:
+        return
+    if not tail:
+        return
+    print(f"--- last {len(tail)} line(s) from {LOG_PATH} ---", file=sys.stderr)
+    for line in tail:
+        print(line, file=sys.stderr)
+
+
 def _healthy(port: int) -> bool:
     try:
         with urlopen(f"http://{DEFAULT_HOST}:{port}/health", timeout=0.5) as response:
@@ -659,6 +795,7 @@ def _pid_running(pid: int | None) -> bool:
     try:
         if IS_WINDOWS:
             import ctypes
+
             handle = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)
             if handle:
                 ctypes.windll.kernel32.CloseHandle(handle)

@@ -1,5 +1,9 @@
 # Generated runtime + user state
 .codex-shim/
+
+# Local scratch / debug (do not commit)
+.pr-body.md
+shim-debug.log
 *.log
 *.pid
 

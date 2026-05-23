@@ -222,18 +222,28 @@ codex-shim patch-app
 # Launch it with: …\.codex-shim\codex-desktop-patched\app\Codex.exe
 ```
 
-Then start the shim and launch the patched executable:
+Then start the shim (use the same Python that has `aiohttp` installed) and launch
+Codex:
 
 ```powershell
 codex-shim start
-& "$HOME\Documents\codex-shim\.codex-shim\codex-desktop-patched\app\Codex.exe"
+codex-shim app .
 ```
 
-> **Note:** On Windows `codex-shim app` launches the original (unpatched) Codex.
-> To use custom models you must launch the **patched** executable directly until
-> the MSIX auto-updates to a version that disables the picker filter.
+`app` launches the patched copy under `.codex-shim/codex-desktop-patched/app/`
+when `patch-app` has been run. Run `patch-app` first if you see a warning that
+the patched executable is missing.
 
-To roll back: delete `.codex-shim/codex-desktop-patched/`.
+To roll back:
+
+```powershell
+codex-shim restore-app   # removes patched copies + ~/.codex shim config
+codex-shim stop          # stops the local server
+```
+
+Close Codex first if folders are "still in use". Then launch Codex from the Start
+menu (not `codex-desktop-patched-*/Codex.exe`). The read-only MSIX install is never
+modified.
 
 ---
 
