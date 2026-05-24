@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
+
+import certifi
+
+# macOS Python 3.13+ needs explicit CA bundle for SSL verification.
+# Must be set before importing aiohttp, which reads it at import time.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -48,6 +55,9 @@ class ShimServer:
         if route.is_openai_chat:
             forwarded = dict(body)
             forwarded["model"] = route.model
+            # Normalize developer role → system for upstreams that don't support it
+            if "messages" in forwarded:
+                forwarded["messages"] = _normalize_roles(forwarded["messages"])
             return await self._post_openai_chat(request, route, forwarded, as_responses=False)
         if route.is_anthropic:
             forwarded = chat_to_anthropic(body, route.model, route.max_output_tokens)
@@ -261,14 +271,17 @@ class ResponsesStreamState:
         await _write_sse(response, {"type": "response.created", "response": self._response("in_progress")})
 
     async def finish(self, response: web.StreamResponse) -> None:
+        # Close reasoning blocks first (lower output_index), then message,
+        # then tools — matching the expected event order so Codex sees
+        # reasoning completed before the answer message.
+        for state in sorted(self.reasoning_blocks.values(), key=lambda s: s["output_index"]):
+            if not state.get("closed"):
+                await self._close_reasoning(response, state)
         if self.message_opened and not self.message_closed:
             await self._close_message(response)
         for state in sorted(self.tool_calls.values(), key=lambda s: s["output_index"]):
             if not state.get("closed"):
                 await self._close_tool(response, state)
-        for state in sorted(self.reasoning_blocks.values(), key=lambda s: s["output_index"]):
-            if not state.get("closed"):
-                await self._close_reasoning(response, state)
         await _write_sse(response, {"type": "response.completed", "response": self._response("completed", final=True)})
         await response.write(b"data: [DONE]\n\n")
 
@@ -283,6 +296,13 @@ class ResponsesStreamState:
             await self._chat_reasoning_delta(response, reasoning)
         content = delta.get("content")
         if content:
+            # DeepSeek SSE has no explicit "reasoning done" signal — it just
+            # transitions from reasoning_content to content. Close any open
+            # reasoning block before showing the answer so Codex doesn't keep
+            # the thinking indicator spinning after the answer appears.
+            for key, state in list(self.reasoning_blocks.items()):
+                if not state.get("closed"):
+                    await self._close_reasoning(response, state)
             await self._text_delta(response, content)
         for call in delta.get("tool_calls") or []:
             await self._chat_tool_delta(response, call)
@@ -843,6 +863,18 @@ def _anthropic_stream_to_chat_chunk(event: dict[str, Any], model: str) -> dict[s
 async def _error_response(upstream) -> web.Response:
     text = await upstream.text()
     return web.Response(status=upstream.status, text=text, content_type=upstream.content_type or "text/plain")
+
+
+def _normalize_roles(messages: list[dict]) -> list[dict]:
+    """Replace developer role with system for upstreams that don't support it."""
+    result = []
+    for msg in messages:
+        if isinstance(msg, dict):
+            msg = dict(msg)
+            if msg.get("role") == "developer":
+                msg["role"] = "system"
+        result.append(msg)
+    return result
 
 
 def main(argv: list[str] | None = None) -> None:

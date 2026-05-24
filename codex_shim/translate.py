@@ -31,11 +31,20 @@ def responses_to_chat(body: dict[str, Any], upstream_model: str) -> dict[str, An
     instructions = body.get("instructions")
     if instructions:
         messages.append({"role": "system", "content": _content_to_text(instructions)})
-    # Chat-completions upstreams don't understand reasoning items; drop the
-    # marker messages we emit for the Anthropic path.
+    # Some upstreams (e.g. DeepSeek) require reasoning_content from previous
+    # turns to be passed back in the assistant message. Track pending reasoning
+    # items and attach them to the following assistant message.
+    pending_reasoning: str | None = None
     for m in _responses_input_to_messages(body.get("input")):
         if m.get("_reasoning_only"):
+            summary = m.get("summary") or []
+            text = " ".join(s.get("text", "") for s in summary if isinstance(s, dict))
+            if text:
+                pending_reasoning = text
             continue
+        if pending_reasoning and m.get("role") == "assistant":
+            m["reasoning_content"] = pending_reasoning
+            pending_reasoning = None
         messages.append(m)
 
     chat: dict[str, Any] = {
@@ -48,6 +57,7 @@ def responses_to_chat(body: dict[str, Any], upstream_model: str) -> dict[str, An
     _copy_if_present(body, chat, "max_output_tokens", "max_tokens")
     _copy_if_present(body, chat, "max_tokens")
     _copy_if_present(body, chat, "parallel_tool_calls")
+    _copy_if_present(body, chat, "reasoning_effort")
 
     tools = _responses_tools_to_chat_tools(body.get("tools"))
     if tools:
@@ -212,6 +222,18 @@ def chat_completion_to_response(payload: dict[str, Any], requested_model: str) -
     choice = (payload.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     output: list[dict[str, Any]] = []
+    # Include reasoning_content as a reasoning output item for upstreams
+    # that require it passed back on subsequent turns (e.g. DeepSeek).
+    reasoning = message.get("reasoning_content")
+    if reasoning:
+        output.append(
+            {
+                "id": "reasoning_0",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"text": reasoning}],
+            }
+        )
     text = strip_think(message.get("content") or "")
     if text:
         output.append(
@@ -279,7 +301,11 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
         item_type = item.get("type")
         if item_type in {"message", None} and "role" in item:
             flush_pending_assistant_tool_calls()
-            messages.append({"role": item.get("role", "user"), "content": _content_to_text(item.get("content", ""))})
+            role = item.get("role", "user")
+            # Normalize developer → system for upstream compatibility
+            if role == "developer":
+                role = "system"
+            messages.append({"role": role, "content": _content_to_text(item.get("content", ""))})
         elif item_type in {"input_text", "text"}:
             flush_pending_assistant_tool_calls()
             messages.append({"role": "user", "content": _content_to_text(item)})
