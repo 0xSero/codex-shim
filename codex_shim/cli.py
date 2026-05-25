@@ -127,17 +127,12 @@ def main(argv: list[str] | None = None) -> int:
         provider_alias = sub.add_parser(provider_name, help=f"Run Codex CLI through {spec.title}.")
         provider_alias.add_argument("args", nargs=argparse.REMAINDER)
 
-    provider_parser = sub.add_parser("provider", help="List, configure, or run provider workflows.")
+    provider_parser = sub.add_parser("provider", help="List built-in provider workflows.")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list")
-    provider_setup = provider_sub.add_parser("setup")
-    provider_setup.add_argument("provider", choices=sorted(PROVIDER_SPECS))
-    provider_run = provider_sub.add_parser("run")
-    provider_run.add_argument("provider", choices=sorted(PROVIDER_SPECS))
-    provider_run.add_argument("args", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
-    port = args.port or DEFAULT_PORT
+    port = args.port if args.port is not None else DEFAULT_PORT
     if args.command == "generate":
         generate(args.settings, port)
         return 0
@@ -192,10 +187,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "provider":
         if args.provider_command == "list":
             return list_providers()
-        if args.provider_command == "setup":
-            return setup_provider(args.provider)
-        if args.provider_command == "run":
-            return run_provider(args.provider, args.args, args.port)
         return 0
     return 2
 
@@ -230,7 +221,7 @@ def run_provider(provider: str, codex_args: list[str], requested_port: int | Non
         return 1
 
     os.environ.setdefault("CODEX_SHIM_DISABLE_CHATGPT", "1")
-    port = requested_port or spec.port
+    port = requested_port if requested_port is not None else spec.port
     generate(spec.settings_path, port)
     ensure_started(spec.settings_path, port)
     model = os.environ.get("CODEX_SHIM_MODEL") or _first_model_slug(spec.settings_path)
