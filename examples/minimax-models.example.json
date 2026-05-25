@@ -1,0 +1,12 @@
+{
+  "models": [
+    {
+      "model": "MiniMax-M2.7",
+      "provider": "minimax",
+      "base_url": "https://api.minimax.io/v1",
+      "api_key": "REPLACE_WITH_MINIMAX_TOKEN_PLAN_KEY",
+      "display_name": "MiniMax M2.7",
+      "max_context_limit": 1000000
+    }
+  ]
+}

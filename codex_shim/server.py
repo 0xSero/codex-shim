@@ -11,14 +11,16 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from .settings import (
     CHATGPT_MODEL_SLUG,
-    DEFAULT_FACTORY_SETTINGS,
+    DEFAULT_CODEX_AUTH,
+    DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
-    FactoryModel,
-    FactorySettings,
-    chatgpt_passthrough_enabled,
+    ModelSettings,
+    ShimModel,
+    chatgpt_passthrough_available,
 )
 from .translate import (
+    SHIM_ENCRYPTED_CONTENT_PREFIX,
     anthropic_to_chat_response,
     anthropic_to_response,
     chat_completion_to_response,
@@ -29,8 +31,8 @@ from .translate import (
 
 
 class ShimServer:
-    def __init__(self, settings_path: Path = DEFAULT_FACTORY_SETTINGS):
-        self.settings = FactorySettings(settings_path)
+    def __init__(self, settings_path: Path = DEFAULT_SETTINGS):
+        self.settings = ModelSettings(settings_path)
         self.timeout = ClientTimeout(total=None, sock_connect=120, sock_read=None)
 
     def app(self) -> web.Application:
@@ -43,11 +45,21 @@ class ShimServer:
 
     async def health(self, _request: web.Request) -> web.Response:
         models = self.settings.load()
-        return web.json_response({"ok": True, "models": len(models)})
+        count = len(models) + (1 if chatgpt_passthrough_available() else 0)
+        return web.json_response(
+            {
+                "ok": True,
+                "models": count,
+                "chatgpt_passthrough": chatgpt_passthrough_available(),
+            }
+        )
 
     async def models(self, _request: web.Request) -> web.Response:
         now = int(time.time())
-        data = [{"id": model.slug, "object": "model", "created": now, "owned_by": "factory"} for model in self.settings.load()]
+        data: list[dict[str, Any]] = []
+        if chatgpt_passthrough_available():
+            data.append({"id": CHATGPT_MODEL_SLUG, "object": "model", "created": now, "owned_by": "chatgpt"})
+        data.extend({"id": model.slug, "object": "model", "created": now, "owned_by": "codex-shim"} for model in self.settings.load())
         return web.json_response({"object": "list", "data": data})
 
     async def chat_completions(self, request: web.Request) -> web.StreamResponse:
@@ -56,18 +68,22 @@ class ShimServer:
         if route.is_openai_chat:
             forwarded = dict(body)
             forwarded["model"] = route.model
+            if "messages" in forwarded:
+                forwarded["messages"] = _normalize_roles(forwarded["messages"])
             return await self._post_openai_chat(request, route, forwarded, as_responses=False)
         if route.is_anthropic:
             forwarded = chat_to_anthropic(body, route.model, route.max_output_tokens)
             return await self._post_anthropic(request, route, forwarded, as_responses=False)
-        raise web.HTTPBadGateway(text=f"Unsupported Factory provider: {route.provider}")
+        raise web.HTTPBadGateway(text=f"Unsupported model provider: {route.provider}")
 
     async def responses(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
         _log_incoming_request("/v1/responses", body)
         model = str(body.get("model") or "")
-        if chatgpt_passthrough_enabled() and (model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5")):
+        if model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5"):
             return await self._chatgpt_passthrough(request, body)
+        if self._needs_image_gen(body) or self._needs_image_followup(body):
+            return await self._chatgpt_passthrough(request, body, response_model_override=model)
         route = self._route(body)
         if route.is_openai_chat:
             forwarded = responses_to_chat(body, route.model)
@@ -75,17 +91,174 @@ class ShimServer:
         if route.is_anthropic:
             forwarded = responses_to_anthropic(body, route.model, route.max_output_tokens)
             return await self._post_anthropic(request, route, forwarded, as_responses=True)
-        raise web.HTTPBadGateway(text=f"Unsupported Factory provider: {route.provider}")
+        raise web.HTTPBadGateway(text=f"Unsupported model provider: {route.provider}")
+
+    def _needs_image_gen(self, body: dict[str, Any]) -> bool:
+        tools = body.get("tools") or []
+        image_tool_names: set[str] = set()
+        non_image_tool_count = 0
+        for tool in tools:
+            if not isinstance(tool, dict):
+                non_image_tool_count += 1
+                continue
+            tool_type = str(tool.get("type") or "")
+            fn = tool.get("function") or tool.get("name") or {}
+            name = fn.get("name") if isinstance(fn, dict) else fn
+            normalized = f"{tool_type} {name or ''}".lower()
+            is_image_tool = tool_type in {"image_generation", "image_gen"} or ("image" in normalized and "gen" in normalized)
+            if is_image_tool:
+                image_tool_names.add(str(name or tool_type))
+            else:
+                non_image_tool_count += 1
+        if not image_tool_names:
+            return False
+
+        tool_choice = body.get("tool_choice")
+        if isinstance(tool_choice, str):
+            if any(name.lower() in tool_choice.lower() for name in image_tool_names):
+                return True
+        elif isinstance(tool_choice, dict):
+            fn = tool_choice.get("function") or {}
+            choice_name = str(tool_choice.get("name") or (fn.get("name") if isinstance(fn, dict) else "") or tool_choice.get("type") or "").lower()
+            if any(name.lower() in choice_name for name in image_tool_names):
+                return True
+
+        if non_image_tool_count == 0:
+            return True
+
+        latest = self._latest_user_text(body).lower()
+        if not latest:
+            return False
+        image_intent_markers = (
+            "@image",
+            "imagegen",
+            "image gen",
+            "image_gen",
+            "generate image",
+            "generate an image",
+            "generate a picture",
+            "generate a photo",
+            "generate an illustration",
+            "create image",
+            "create an image",
+            "create a picture",
+            "create a photo",
+            "draw image",
+            "draw an image",
+            "make image",
+            "make an image",
+            "render image",
+        )
+        if any(marker in latest for marker in image_intent_markers):
+            return True
+        code_words = {"code", "component", "react", "tsx", "jsx", "html", "css", "svg", "file"}
+        latest_words = {"".join(ch for ch in word if ch.isalnum()) for word in latest.split()}
+        if latest_words & code_words:
+            return False
+        creative_objects = ("icon", "logo", "wallpaper", "poster", "banner", "avatar")
+        creative_verbs = ("generate", "create", "draw", "design", "make", "render")
+        return any(verb in latest for verb in creative_verbs) and any(obj in latest for obj in creative_objects)
+
+    def _needs_image_followup(self, body: dict[str, Any]) -> bool:
+        if not self._has_image_generation_history(body):
+            return False
+        latest = self._latest_user_text(body).lower()
+        if not latest:
+            return False
+        direct_image_refs = ("image", "picture", "photo", "icon", "logo", "illustration")
+        followup_actions = (
+            "inspect",
+            "look at",
+            "view",
+            "describe",
+            "what do you see",
+            "analyze",
+            "modify",
+            "edit",
+            "change",
+            "improve",
+            "enhance",
+            "upscale",
+            "variation",
+            "use",
+            "based on",
+            "same",
+        )
+        if any(ref in latest for ref in direct_image_refs) and any(action in latest for action in followup_actions):
+            return True
+        pronoun_followups = (
+            "inspect it",
+            "look at it",
+            "view it",
+            "describe it",
+            "analyze it",
+            "modify it",
+            "edit it",
+            "change it",
+            "improve it",
+            "enhance it",
+            "upscale it",
+            "make it brighter",
+            "make it darker",
+            "make it more",
+            "use it",
+            "based on it",
+        )
+        return any(marker in latest for marker in pronoun_followups)
+
+    def _has_image_generation_history(self, body: dict[str, Any]) -> bool:
+        inputs = body.get("input") or []
+        if not isinstance(inputs, list):
+            return False
+        return any(isinstance(item, dict) and item.get("type") == "image_generation_call" for item in inputs)
+
+    def _latest_user_text(self, body: dict[str, Any]) -> str:
+        inputs = body.get("input") or []
+        if isinstance(inputs, str):
+            return inputs
+        if not isinstance(inputs, list):
+            return ""
+        for item in reversed(inputs):
+            if isinstance(item, str):
+                return item
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "user":
+                text = self._content_to_debug_text(item.get("content"))
+                if text:
+                    return text
+            elif item.get("type") in {"input_text", "text"}:
+                text = self._content_to_debug_text(item)
+                if text:
+                    return text
+        return ""
+
+    def _content_to_debug_text(self, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    parts.append(str(part))
+            return "\n".join(part for part in parts if part)
+        if isinstance(content, dict):
+            return str(content.get("text") or content.get("content") or "")
+        return str(content)
 
     async def _chatgpt_passthrough(
-        self, request: web.Request, body: dict[str, Any]
+        self, request: web.Request, body: dict[str, Any], response_model_override: str | None = None
     ) -> web.StreamResponse:
         """Forward a Responses request to chatgpt.com using the user's Codex auth.
 
         Lets the picker expose OpenAI's real GPT-5.5 (ChatGPT subscription) as a
-        first-class model alongside Factory BYOK entries.
+        first-class model alongside configured BYOK entries.
         """
-        auth_path = Path("~/.codex/auth.json").expanduser()
+        auth_path = DEFAULT_CODEX_AUTH.expanduser()
         try:
             auth = json.loads(auth_path.read_text())
         except FileNotFoundError:
@@ -95,8 +268,8 @@ class ShimServer:
         account_id = tokens.get("account_id") or ""
         if not access_token:
             raise web.HTTPUnauthorized(text="auth.json has no access_token")
-        forwarded = dict(body)
-        forwarded["model"] = "gpt-5.5"
+        forwarded = _sanitize_chatgpt_passthrough_body(body)
+        forwarded["model"] = CHATGPT_MODEL_SLUG
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -113,12 +286,26 @@ class ShimServer:
                 return await _error_response(upstream)
             if not forwarded.get("stream"):
                 payload = await upstream.json(content_type=None)
+                _rewrite_response_model(payload, response_model_override)
                 return web.json_response(payload)
             response = _sse_response()
             await response.prepare(request)
             try:
-                async for chunk in upstream.content.iter_chunked(4096):
-                    await _safe_write(response, chunk)
+                if response_model_override:
+                    async for line in _sse_lines(upstream):
+                        if line == "[DONE]":
+                            await _safe_write(response, b"data: [DONE]\n\n")
+                            break
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            await _safe_write(response, f"data: {line}\n\n".encode())
+                            continue
+                        _rewrite_response_model(payload, response_model_override)
+                        await _write_sse(response, payload)
+                else:
+                    async for chunk in upstream.content.iter_chunked(4096):
+                        await _safe_write(response, chunk)
             except ClientDisconnected:
                 pass
             finally:
@@ -129,7 +316,7 @@ class ShimServer:
                 pass
             return response
 
-    def _route(self, body: dict[str, Any]) -> FactoryModel:
+    def _route(self, body: dict[str, Any]) -> ShimModel:
         requested = str(body.get("model") or "")
         route = self.settings.by_slug_or_model(requested)
         if route is None:
@@ -137,7 +324,7 @@ class ShimServer:
         return route
 
     async def _post_openai_chat(
-        self, request: web.Request, route: FactoryModel, body: dict[str, Any], as_responses: bool
+        self, request: web.Request, route: ShimModel, body: dict[str, Any], as_responses: bool
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
@@ -153,7 +340,7 @@ class ShimServer:
         return web.json_response(payload)
 
     async def _post_anthropic(
-        self, request: web.Request, route: FactoryModel, body: dict[str, Any], as_responses: bool
+        self, request: web.Request, route: ShimModel, body: dict[str, Any], as_responses: bool
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
@@ -169,7 +356,7 @@ class ShimServer:
         return web.json_response(anthropic_to_chat_response(payload, route.slug))
 
     async def _stream_openai_chat(
-        self, request: web.Request, upstream, route: FactoryModel, as_responses: bool
+        self, request: web.Request, upstream, route: ShimModel, as_responses: bool
     ) -> web.StreamResponse:
         response = _sse_response()
         await response.prepare(request)
@@ -204,7 +391,7 @@ class ShimServer:
         return response
 
     async def _stream_anthropic(
-        self, request: web.Request, upstream, route: FactoryModel, as_responses: bool
+        self, request: web.Request, upstream, route: ShimModel, as_responses: bool
     ) -> web.StreamResponse:
         response = _sse_response()
         await response.prepare(request)
@@ -239,6 +426,54 @@ class ShimServer:
         return response
 
 
+_DROP_ITEM = object()
+
+
+def _sanitize_chatgpt_passthrough_body(body: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _sanitize_chatgpt_passthrough_value(body)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _sanitize_chatgpt_passthrough_value(value: Any) -> Any:
+    if isinstance(value, list):
+        output = []
+        for item in value:
+            sanitized = _sanitize_chatgpt_passthrough_value(item)
+            if sanitized is not _DROP_ITEM:
+                output.append(sanitized)
+        return output
+    if isinstance(value, dict):
+        if value.get("type") == "reasoning" and _has_shim_encrypted_content(value):
+            return _DROP_ITEM
+        output = {}
+        for key, item in value.items():
+            if key == "encrypted_content" and isinstance(item, str) and item.startswith(SHIM_ENCRYPTED_CONTENT_PREFIX):
+                continue
+            sanitized = _sanitize_chatgpt_passthrough_value(item)
+            if sanitized is not _DROP_ITEM:
+                output[key] = sanitized
+        return output
+    return value
+
+
+def _has_shim_encrypted_content(value: dict[str, Any]) -> bool:
+    encrypted_content = value.get("encrypted_content")
+    return isinstance(encrypted_content, str) and encrypted_content.startswith(SHIM_ENCRYPTED_CONTENT_PREFIX)
+
+
+def _rewrite_response_model(payload: Any, model: str | None) -> None:
+    if not model:
+        return
+    if isinstance(payload, dict):
+        if payload.get("model") == CHATGPT_MODEL_SLUG:
+            payload["model"] = model
+        for value in payload.values():
+            _rewrite_response_model(value, model)
+    elif isinstance(payload, list):
+        for item in payload:
+            _rewrite_response_model(item, model)
+
+
 class ResponsesStreamState:
     """Translates upstream chat-completions / anthropic stream events into the
     Codex Desktop Responses-API event sequence. Keeps the message item and
@@ -269,14 +504,14 @@ class ResponsesStreamState:
         await _write_sse(response, {"type": "response.created", "response": self._response("in_progress")})
 
     async def finish(self, response: web.StreamResponse) -> None:
+        for state in sorted(self.reasoning_blocks.values(), key=lambda s: s["output_index"]):
+            if not state.get("closed"):
+                await self._close_reasoning(response, state)
         if self.message_opened and not self.message_closed:
             await self._close_message(response)
         for state in sorted(self.tool_calls.values(), key=lambda s: s["output_index"]):
             if not state.get("closed"):
                 await self._close_tool(response, state)
-        for state in sorted(self.reasoning_blocks.values(), key=lambda s: s["output_index"]):
-            if not state.get("closed"):
-                await self._close_reasoning(response, state)
         await _write_sse(response, {"type": "response.completed", "response": self._response("completed", final=True)})
         await response.write(b"data: [DONE]\n\n")
 
@@ -291,6 +526,9 @@ class ResponsesStreamState:
             await self._chat_reasoning_delta(response, reasoning)
         content = delta.get("content")
         if content:
+            for state in list(self.reasoning_blocks.values()):
+                if not state.get("closed"):
+                    await self._close_reasoning(response, state)
             await self._text_delta(response, content)
         for call in delta.get("tool_calls") or []:
             await self._chat_tool_delta(response, call)
@@ -727,14 +965,14 @@ def _join_url(base_url: str, endpoint: str) -> str:
     return urljoin(base + "/", "v1" + endpoint)
 
 
-def _openai_headers(route: FactoryModel) -> dict[str, str]:
+def _openai_headers(route: ShimModel) -> dict[str, str]:
     headers = {"Content-Type": "application/json", **route.extra_headers}
     if route.api_key:
         headers.setdefault("Authorization", f"Bearer {route.api_key}")
     return headers
 
 
-def _anthropic_headers(route: FactoryModel) -> dict[str, str]:
+def _anthropic_headers(route: ShimModel) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "anthropic-version": "2023-06-01",
@@ -853,9 +1091,20 @@ async def _error_response(upstream) -> web.Response:
     return web.Response(status=upstream.status, text=text, content_type=upstream.content_type or "text/plain")
 
 
+def _normalize_roles(messages: list[dict]) -> list[dict]:
+    result = []
+    for message in messages:
+        if isinstance(message, dict):
+            message = dict(message)
+            if message.get("role") == "developer":
+                message["role"] = "system"
+        result.append(message)
+    return result
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--settings", type=Path, default=DEFAULT_FACTORY_SETTINGS)
+    parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
