@@ -82,6 +82,28 @@ def test_ollama_launch_models_schema_loads(tmp_path):
     ]
 
 
+def test_minimax_provider_uses_openai_chat_translation(tmp_path):
+    settings = tmp_path / "minimax-models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "MiniMax-M2.7",
+                        "display_name": "MiniMax M2.7",
+                        "provider": "minimax",
+                        "base_url": "https://api.minimax.io/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.is_openai_chat is True
+
+
 def test_catalog_preserves_context_and_visibility():
     model = ModelSettingsFixture.one()
     entry = catalog_entry(model)

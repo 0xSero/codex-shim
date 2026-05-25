@@ -271,6 +271,38 @@ For one-off CLI runs, use inline `-c` overrides instead of changing
 codex-shim codex -- "inspect this repo and summarize the architecture"
 ```
 
+### 5. One-command provider workflows
+
+For common BYOK providers, `setup` writes a private settings file under
+`~/.codex-shim/`, and the provider command starts the shim on its own port,
+disables ChatGPT passthrough for that run, selects the first configured model,
+and launches Codex with temporary inline `-c` overrides only:
+
+```bash
+codex-shim setup openrouter
+codex-shim openrouter .
+
+codex-shim setup minimax
+codex-shim minimax .
+```
+
+OpenRouter uses `~/.codex-shim/openrouter-models.json` and port `8766`.
+MiniMax Token Plan uses `~/.codex-shim/minimax-models.json` and port `8767`.
+Real API keys belong only in those local files; committed-safe examples live in
+`examples/openrouter-models.example.json` and `examples/minimax-models.example.json`.
+
+To change the stored model or key later, rerun `codex-shim setup <provider>`.
+The prompt shows current values and lets Enter keep them; API keys are not
+echoed, and Enter keeps the existing key when one is already present.
+
+Useful overrides:
+
+```bash
+CODEX_SHIM_MODEL=my-slug codex-shim openrouter .
+codex-shim --port 8771 minimax .
+codex-shim provider list
+```
+
 ---
 
 ## Custom config file
@@ -331,6 +363,7 @@ Supported `provider` values:
 |---|---|
 | `openai` | OpenAI `/v1/chat/completions` |
 | `generic-chat-completion-api` | OpenAI-shaped chat completions |
+| `minimax` | MiniMax Token Plan `/v1/chat/completions` |
 | `anthropic` | Anthropic `/v1/messages` |
 
 Useful model fields:
@@ -697,6 +730,11 @@ codex-shim model list        list slugs currently usable in the picker
 codex-shim model use <slug>  set the Desktop default model in managed config
 codex-shim codex -- <args>   exec `codex` CLI through inline shim overrides
 codex-shim app [path]        launch Codex Desktop through managed shim config
+codex-shim setup openrouter  create/update ~/.codex-shim/openrouter-models.json
+codex-shim openrouter [path] run Codex CLI through OpenRouter on port 8766
+codex-shim setup minimax     create/update ~/.codex-shim/minimax-models.json
+codex-shim minimax [path]    run Codex CLI through MiniMax on port 8767
+codex-shim provider list     list built-in provider shortcuts
 codex-shim patch-app         patch macOS Codex Desktop picker allowlist
 codex-shim restore-app       restore macOS app.asar from patch backup
 

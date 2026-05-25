@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+import getpass
 import os
 from pathlib import Path
 import ctypes
@@ -42,10 +44,58 @@ PREVIOUS_TOP_LEVEL_PREFIX = "# codex-shim previous-top-level = "
 MANAGED_TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json"}
 
 
+@dataclass(frozen=True)
+class ProviderSpec:
+    name: str
+    title: str
+    settings_path: Path
+    port: int
+    placeholder_key: str
+    default_model: str
+    default_display_name: str
+    default_provider: str
+    default_base_url: str
+    default_context: int
+    allowed_providers: frozenset[str]
+    template_path: Path
+
+
+PROVIDER_SPECS = {
+    "openrouter": ProviderSpec(
+        name="openrouter",
+        title="OpenRouter",
+        settings_path=DEFAULT_SETTINGS.parent / "openrouter-models.json",
+        port=8766,
+        placeholder_key="REPLACE_WITH_OPENROUTER_API_KEY",
+        default_model="openai/gpt-4o-mini",
+        default_display_name="OpenRouter GPT-4o Mini",
+        default_provider="generic-chat-completion-api",
+        default_base_url="https://openrouter.ai/api/v1",
+        default_context=128000,
+        allowed_providers=frozenset({"generic-chat-completion-api", "openai"}),
+        template_path=PROJECT_ROOT / "examples" / "openrouter-models.example.json",
+    ),
+    "minimax": ProviderSpec(
+        name="minimax",
+        title="MiniMax Token Plan",
+        settings_path=DEFAULT_SETTINGS.parent / "minimax-models.json",
+        port=8767,
+        placeholder_key="REPLACE_WITH_MINIMAX_TOKEN_PLAN_KEY",
+        default_model="MiniMax-M2.7",
+        default_display_name="MiniMax M2.7",
+        default_provider="minimax",
+        default_base_url="https://api.minimax.io/v1",
+        default_context=1000000,
+        allowed_providers=frozenset({"minimax", "generic-chat-completion-api", "openai"}),
+        template_path=PROJECT_ROOT / "examples" / "minimax-models.example.json",
+    ),
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="codex-shim")
     parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--port", type=int)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("generate")
     sub.add_parser("list")
@@ -71,17 +121,33 @@ def main(argv: list[str] | None = None) -> int:
     app_parser.add_argument("-m", "--model", dest="model_slug")
     app_parser.add_argument("path", nargs="?", default=".")
 
+    setup_parser = sub.add_parser("setup", help="Configure a provider settings file under ~/.codex-shim.")
+    setup_parser.add_argument("provider", choices=sorted(PROVIDER_SPECS))
+
+    run_parser = sub.add_parser("run", help="Run Codex CLI through a configured provider.")
+    run_parser.add_argument("provider", choices=sorted(PROVIDER_SPECS))
+    run_parser.add_argument("args", nargs=argparse.REMAINDER)
+
+    for provider_name, spec in PROVIDER_SPECS.items():
+        provider_alias = sub.add_parser(provider_name, help=f"Run Codex CLI through {spec.title}.")
+        provider_alias.add_argument("args", nargs=argparse.REMAINDER)
+
+    provider_parser = sub.add_parser("provider", help="List built-in provider workflows.")
+    provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
+    provider_sub.add_parser("list")
+
     args = parser.parse_args(argv)
+    port = args.port if args.port is not None else DEFAULT_PORT
     if args.command == "generate":
-        generate(args.settings, args.port)
+        generate(args.settings, port)
         return 0
     if args.command == "list":
         return list_models(args.settings)
     if args.command in {"start", "enable"}:
-        generate(args.settings, args.port)
-        code = start(args.settings, args.port)
+        generate(args.settings, port)
+        code = start(args.settings, port)
         if code == 0 and args.command == "enable":
-            install_codex_config(args.settings, args.port)
+            install_codex_config(args.settings, port)
         return code
     if args.command in {"stop", "disable"}:
         if args.command == "disable":
@@ -89,10 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         return stop()
     if args.command == "restart":
         stop()
-        generate(args.settings, args.port)
-        return start(args.settings, args.port)
+        generate(args.settings, port)
+        return start(args.settings, port)
     if args.command == "status":
-        return status(args.port)
+        return status(port)
     if args.command == "patch-app":
         return patch_codex_app()
     if args.command == "restore-app":
@@ -101,23 +167,212 @@ def main(argv: list[str] | None = None) -> int:
         if args.model_command == "list":
             return list_models(args.settings)
         if args.model_command == "use":
-            generate(args.settings, args.port)
-            ensure_started(args.settings, args.port)
-            install_codex_config(args.settings, args.port, args.model_slug)
+            generate(args.settings, port)
+            ensure_started(args.settings, port)
+            install_codex_config(args.settings, port, args.model_slug)
             print(f"Active Codex shim model: {args.model_slug}")
             return 0
     if args.command == "codex":
-        generate(args.settings, args.port)
-        ensure_started(args.settings, args.port)
-        exec_codex(args.settings, args.port, args.args)
+        generate(args.settings, port)
+        ensure_started(args.settings, port)
+        exec_codex(args.settings, port, args.args)
         return 0
     if args.command == "app":
-        generate(args.settings, args.port)
-        ensure_started(args.settings, args.port)
-        install_codex_config(args.settings, args.port, args.model_slug)
-        exec_codex_app(args.settings, args.port, args.path)
+        generate(args.settings, port)
+        ensure_started(args.settings, port)
+        install_codex_config(args.settings, port, args.model_slug)
+        exec_codex_app(args.settings, port, args.path)
+        return 0
+    if args.command == "setup":
+        return setup_provider(args.provider)
+    if args.command == "run":
+        return run_provider(args.provider, args.args, args.port)
+    if args.command in PROVIDER_SPECS:
+        return run_provider(args.command, args.args, args.port)
+    if args.command == "provider":
+        if args.provider_command == "list":
+            return list_providers()
         return 0
     return 2
+
+
+def list_providers() -> int:
+    width = max(len(name) for name in PROVIDER_SPECS)
+    for spec in PROVIDER_SPECS.values():
+        print(f"{spec.name:<{width}}  {spec.title}  ->  {spec.settings_path}")
+    return 0
+
+
+def setup_provider(provider: str) -> int:
+    spec = PROVIDER_SPECS[provider]
+    status = _provider_settings_status(spec)
+    _prompt_provider_setup(spec, status)
+    status = _provider_settings_status(spec)
+    if status != "ok":
+        print(f"{spec.title} settings are still not usable: {status}", file=sys.stderr)
+        return 1
+    print(f"{spec.title} settings configured. Run: codex-shim {spec.name} .")
+    return 0
+
+
+def run_provider(provider: str, codex_args: list[str], requested_port: int | None = None) -> int:
+    spec = PROVIDER_SPECS[provider]
+    status = _provider_settings_status(spec)
+    if status != "ok":
+        _prompt_provider_setup(spec, status)
+        status = _provider_settings_status(spec)
+    if status != "ok":
+        print(f"{spec.title} settings are still not usable: {status}", file=sys.stderr)
+        return 1
+
+    previous_disable_chatgpt = os.environ.get("CODEX_SHIM_DISABLE_CHATGPT")
+    os.environ["CODEX_SHIM_DISABLE_CHATGPT"] = "1"
+    try:
+        port = requested_port if requested_port is not None else spec.port
+        generate(spec.settings_path, port)
+        ensure_started(spec.settings_path, port)
+        model = os.environ.get("CODEX_SHIM_MODEL") or _first_model_slug(spec.settings_path)
+        if not model:
+            print(f"No model slug found in {spec.settings_path}.", file=sys.stderr)
+            return 1
+        codex_args = list(codex_args or [])
+        if codex_args[:1] == ["--"]:
+            codex_args = codex_args[1:]
+        exec_codex(spec.settings_path, port, ["-m", model, *codex_args])
+    finally:
+        if previous_disable_chatgpt is None:
+            os.environ.pop("CODEX_SHIM_DISABLE_CHATGPT", None)
+        else:
+            os.environ["CODEX_SHIM_DISABLE_CHATGPT"] = previous_disable_chatgpt
+    return 0
+
+
+def _provider_settings_status(spec: ProviderSpec) -> str:
+    if not spec.settings_path.exists():
+        return "missing"
+    try:
+        models = ModelSettings(spec.settings_path).load()
+    except (OSError, json.JSONDecodeError):
+        return "invalid_json"
+    if not models:
+        return "empty"
+    model = models[0]
+    if model.provider not in spec.allowed_providers:
+        return "unsupported_provider"
+    if not model.base_url:
+        return "missing_base_url"
+    if not model.api_key or model.api_key == spec.placeholder_key:
+        return "missing_key"
+    return "ok"
+
+
+def _prompt_provider_setup(spec: ProviderSpec, status: str) -> None:
+    if not sys.stdin.isatty():
+        print(
+            f"{spec.title} settings are not configured ({status}):\n"
+            f"  {spec.settings_path}\n\n"
+            "Run this helper from an interactive terminal, or create the file manually from:\n"
+            f"  {spec.template_path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if status == "ok":
+        print(
+            f"{spec.title} setup:\n"
+            f"  {spec.settings_path}\n\n"
+            "This will update the provider settings file. The API key will not be echoed.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{spec.title} settings need configuration ({status}):\n"
+            f"  {spec.settings_path}\n\n"
+            "This will write a provider settings file. The API key will not be echoed.",
+            file=sys.stderr,
+        )
+
+    current = _current_provider_settings(spec)
+    key_prompt = f"{spec.title} API key"
+    current_key = current.get("api_key", "")
+    if current_key and current_key != spec.placeholder_key:
+        key_prompt += " [keep existing]"
+    api_key = getpass.getpass(f"{key_prompt}: ")
+    if not api_key and current_key and current_key != spec.placeholder_key:
+        api_key = current_key
+    if not api_key:
+        print("API key is required.", file=sys.stderr)
+        raise SystemExit(1)
+
+    model = _prompt_with_default(f"{spec.title} model", current["model"])
+    display_name = _prompt_with_default("Display name", current["display_name"])
+    base_url = _prompt_with_default("Base URL", current["base_url"])
+    context_raw = _prompt_with_default("Max context tokens", str(current["max_context_limit"]))
+    try:
+        context = int(context_raw)
+    except ValueError:
+        context = spec.default_context
+
+    _write_provider_settings(spec, api_key, model, display_name, base_url, context)
+    print(f"Wrote {spec.settings_path}", file=sys.stderr)
+
+
+def _current_provider_settings(spec: ProviderSpec) -> dict[str, str]:
+    models = []
+    try:
+        models = ModelSettings(spec.settings_path).load()
+    except (OSError, json.JSONDecodeError):
+        pass
+    model = models[0] if models else None
+    return {
+        "api_key": model.api_key if model else "",
+        "model": model.model if model else spec.default_model,
+        "display_name": model.display_name if model else spec.default_display_name,
+        "base_url": model.base_url if model else spec.default_base_url,
+        "max_context_limit": str(model.max_context_limit if model and model.max_context_limit else spec.default_context),
+    }
+
+
+def _prompt_with_default(label: str, default: str) -> str:
+    value = input(f"{label} [{default}]: ")
+    return value or default
+
+
+def _write_provider_settings(
+    spec: ProviderSpec,
+    api_key: str,
+    model: str,
+    display_name: str,
+    base_url: str,
+    context: int,
+) -> None:
+    spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        spec.settings_path.parent.chmod(0o700)
+    except OSError:
+        pass
+    old_umask = os.umask(0o077)
+    try:
+        payload = {
+            "models": [
+                {
+                    "model": model,
+                    "provider": spec.default_provider,
+                    "base_url": base_url.rstrip("/"),
+                    "api_key": api_key,
+                    "display_name": display_name,
+                    "max_context_limit": context,
+                }
+            ]
+        }
+        spec.settings_path.write_text(json.dumps(payload, indent=2) + "\n")
+    finally:
+        os.umask(old_umask)
+
+
+def _first_model_slug(settings_path: Path) -> str | None:
+    models = ModelSettings(settings_path).load()
+    return models[0].slug if models else None
 
 
 def _load_models(settings_path: Path):

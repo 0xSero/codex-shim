@@ -1,0 +1,12 @@
+{
+  "models": [
+    {
+      "model": "openai/gpt-4o-mini",
+      "provider": "generic-chat-completion-api",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "REPLACE_WITH_OPENROUTER_API_KEY",
+      "display_name": "OpenRouter GPT-4o Mini",
+      "max_context_limit": 128000
+    }
+  ]
+}
