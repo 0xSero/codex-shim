@@ -457,6 +457,11 @@ def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
                     content = _content_to_text(content)
                 m["content"] = _sanitize_string(content)
 
+            # Kimi requires reasoning_content on assistant messages when
+            # thinking is enabled.  Add an empty one if missing.
+            if m.get("tool_calls") and "reasoning_content" not in m:
+                m["reasoning_content"] = ""
+
             # Sanitize tool_calls arguments (deep copy to avoid mutating originals)
             orig_calls = m.get("tool_calls")
             if orig_calls:
