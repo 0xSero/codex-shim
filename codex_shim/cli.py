@@ -17,6 +17,7 @@ from urllib.request import urlopen
 from .catalog import _toml_escape, codex_config_overrides, write_catalog, write_config
 from .settings import (
     CHATGPT_MODEL_SLUG,
+    DEFAULT_CODEX_AUTH,
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -132,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         provider_alias = sub.add_parser(provider_name, help=f"Run Codex CLI through {spec.title}.")
         provider_alias.add_argument("args", nargs=argparse.REMAINDER)
 
+    doctor_parser = sub.add_parser("doctor", help="Check imports, config, and provider setup (read-only).")
+    doctor_parser.add_argument(
+        "provider", nargs="?", choices=sorted(PROVIDER_SPECS), default=None, metavar="PROVIDER",
+        help="Limit checks to a specific provider (e.g. openrouter, minimax).",
+    )
+
     provider_parser = sub.add_parser("provider", help="List built-in provider workflows.")
     provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
     provider_sub.add_parser("list")
@@ -189,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_provider(args.provider, args.args, args.port)
     if args.command in PROVIDER_SPECS:
         return run_provider(args.command, args.args, args.port)
+    if args.command == "doctor":
+        return doctor(args.provider, args.settings, port)
     if args.command == "provider":
         if args.provider_command == "list":
             return list_providers()
@@ -201,6 +210,197 @@ def list_providers() -> int:
     for spec in PROVIDER_SPECS.values():
         print(f"{spec.name:<{width}}  {spec.title}  ->  {spec.settings_path}")
     return 0
+
+
+def doctor(provider: str | None, settings_path: Path, port: int) -> int:
+    rows: list[tuple[str, str, str]] = []
+    if provider is None:
+        _dr_import(rows)
+        _dr_codex_cli(rows)
+        _dr_port(rows, port)
+        _dr_main_settings(rows, settings_path)
+        _dr_codex_config(rows)
+        _dr_chatgpt(rows)
+        for spec in PROVIDER_SPECS.values():
+            rows.append(("head", spec.title, ""))
+            _dr_provider(rows, spec)
+    else:
+        spec = PROVIDER_SPECS[provider]
+        rows.append(("head", spec.title, ""))
+        _dr_provider(rows, spec)
+    return _dr_print(rows)
+
+
+def _dr_ok(rows: list, label: str, detail: str = "") -> None:
+    rows.append(("ok", label, detail))
+
+
+def _dr_warn(rows: list, label: str, detail: str = "") -> None:
+    rows.append(("warn", label, detail))
+
+
+def _dr_fail(rows: list, label: str, detail: str = "") -> None:
+    rows.append(("fail", label, detail))
+
+
+def _dr_import(rows: list) -> None:
+    try:
+        import importlib.metadata as _meta
+        ver = _meta.version("codex-shim")
+        _dr_ok(rows, "imports", f"codex_shim {ver} loaded")
+    except Exception:
+        _dr_ok(rows, "imports", "codex_shim loaded")
+
+
+def _dr_codex_cli(rows: list) -> None:
+    from shutil import which
+    path = which("codex")
+    if path:
+        _dr_ok(rows, "codex-cli", path)
+    else:
+        _dr_warn(rows, "codex-cli", "not found on PATH — codex-shim run/codex will fail")
+
+
+def _dr_port(rows: list, port: int) -> None:
+    import socket
+    health = _health(port)
+    if health is not None:
+        n = health.get("models", "?")
+        _dr_ok(rows, f"port {port}", f"shim running ({n} model{'s' if n != 1 else ''})")
+        return
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            occupied = sock.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        occupied = False
+    if occupied:
+        _dr_warn(rows, f"port {port}", "in use by another process — shim start may fail")
+    else:
+        _dr_ok(rows, f"port {port}", "available")
+
+
+def _dr_main_settings(rows: list, settings_path: Path) -> None:
+    expanded = Path(settings_path).expanduser()
+    label = "settings"
+    if not expanded.exists():
+        if expanded == DEFAULT_SETTINGS.expanduser():
+            _dr_warn(rows, label, f"{_dr_path(expanded)} not found — create it or use --settings")
+        else:
+            _dr_fail(rows, label, f"{_dr_path(expanded)} not found")
+        return
+    try:
+        models = ModelSettings(expanded).load()
+    except json.JSONDecodeError as exc:
+        _dr_fail(rows, label, f"{_dr_path(expanded)} — invalid JSON: {exc}")
+        return
+    except Exception as exc:
+        _dr_fail(rows, label, f"{_dr_path(expanded)} — {exc}")
+        return
+    if not models:
+        _dr_warn(rows, label, f"{_dr_path(expanded)} — no models")
+        return
+    _dr_ok(rows, label, f"{_dr_path(expanded)}  {len(models)} model{'s' if len(models) != 1 else ''}")
+    for m in models:
+        key_ok = bool(m.api_key)
+        detail = f"{m.model}  ({m.provider})  key: {'present' if key_ok else 'MISSING'}"
+        (_dr_ok if key_ok else _dr_warn)(rows, f"  {m.slug}", detail)
+
+
+def _dr_codex_config(rows: list) -> None:
+    label = "codex.toml"
+    if not CODEX_CONFIG_PATH.exists():
+        _dr_warn(rows, label, f"{_dr_path(CODEX_CONFIG_PATH)} not found — run codex-shim enable")
+        return
+    text = CODEX_CONFIG_PATH.read_text()
+    if MANAGED_BEGIN not in text:
+        _dr_warn(rows, label, f"{_dr_path(CODEX_CONFIG_PATH)} exists but shim not installed — run codex-shim enable")
+        return
+    active = _current_managed_model()
+    parts = [_dr_path(CODEX_CONFIG_PATH), "managed"]
+    if active:
+        parts.append(f"active: {active}")
+    cleaned = _remove_managed_config(text)
+    saved = _extract_top_level_key_lines(cleaned, MANAGED_TOP_LEVEL_KEYS)
+    if saved:
+        parts.append(f"will preserve: {', '.join(saved)}")
+    _dr_ok(rows, label, "  ".join(parts))
+
+
+def _dr_chatgpt(rows: list) -> None:
+    label = "auth.json"
+    auth_path = DEFAULT_CODEX_AUTH.expanduser()
+    if not auth_path.exists():
+        _dr_warn(rows, label, f"{_dr_path(auth_path)} not found — gpt-5.5 passthrough unavailable")
+        return
+    try:
+        data = json.loads(auth_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        _dr_warn(rows, label, f"{_dr_path(auth_path)} — invalid JSON")
+        return
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    has_token = isinstance(tokens, dict) and bool(tokens.get("access_token"))
+    if has_token:
+        _dr_ok(rows, label, "gpt-5.5 passthrough available")
+    else:
+        _dr_warn(rows, label, f"{_dr_path(auth_path)} present but no access_token — run codex login")
+
+
+def _dr_provider(rows: list, spec: ProviderSpec) -> None:
+    label = "settings"
+    if not spec.settings_path.exists():
+        _dr_warn(rows, label, f"{_dr_path(spec.settings_path)} not found — run: codex-shim setup {spec.name}")
+        return
+    try:
+        models = ModelSettings(spec.settings_path).load()
+    except json.JSONDecodeError as exc:
+        _dr_fail(rows, label, f"{_dr_path(spec.settings_path)} — invalid JSON: {exc}")
+        return
+    except Exception as exc:
+        _dr_fail(rows, label, f"{_dr_path(spec.settings_path)} — {exc}")
+        return
+    if not models:
+        _dr_fail(rows, label, f"{_dr_path(spec.settings_path)} — no models")
+        return
+    _dr_ok(rows, label, f"{_dr_path(spec.settings_path)}  {len(models)} model{'s' if len(models) != 1 else ''}")
+    for m in models:
+        key_ok = bool(m.api_key) and m.api_key != spec.placeholder_key
+        detail = f"{m.model}  ({m.provider})  key: {'present' if key_ok else 'MISSING'}"
+        if m.provider not in spec.allowed_providers:
+            _dr_warn(rows, f"  {m.slug}", detail + f"  — unsupported provider for {spec.name}")
+        elif not m.base_url:
+            _dr_fail(rows, f"  {m.slug}", "base_url missing")
+        elif not key_ok:
+            _dr_fail(rows, f"  {m.slug}", detail)
+        else:
+            _dr_ok(rows, f"  {m.slug}", detail)
+
+
+def _dr_path(path: Path) -> str:
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def _dr_print(rows: list[tuple[str, str, str]]) -> int:
+    top_width = max(
+        (len(label) for s, label, _ in rows if s not in {"", "head"} and not label.startswith("  ")),
+        default=10,
+    )
+    has_fail = False
+    for status, label, detail in rows:
+        if status in {"", "head"}:
+            print(f"\n  {label}")
+            continue
+        if status == "fail":
+            has_fail = True
+        sym = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}.get(status, "    ")
+        if label.startswith("  "):
+            print(f"  {sym}  {label}  {detail}" if detail else f"  {sym}  {label}")
+        else:
+            print(f"  {sym}  {label:<{top_width}}  {detail}" if detail else f"  {sym}  {label}")
+    return 1 if has_fail else 0
 
 
 def setup_provider(provider: str) -> int:
