@@ -204,25 +204,28 @@ file is missing, empty, or still has the placeholder API key, it prompts for
 your OpenRouter key and model and writes the ignored local settings file.
 
 ```bash
-bin/codex-openrouter .
+codex-shim setup openrouter
+codex-shim openrouter .
 ```
 
 To change the stored OpenRouter model or key later:
 
 ```bash
-bin/codex-openrouter setup
+codex-shim setup openrouter
 ```
 
-The setup prompt shows current values and lets Enter keep them. The API key is
-not echoed; pressing Enter keeps the existing key when one is already present.
+The setup prompt shows current values and lets Enter keep them. It prompts for
+model, display name, base URL, and max context. The API key is not echoed;
+pressing Enter keeps the existing key when one is already present.
 
 Optional overrides:
 
 ```bash
-CODEX_SHIM_MODEL=openrouter-owl-alpha bin/codex-openrouter .
-CODEX_SHIM_PORT=8770 bin/codex-openrouter .
-CODEX_SHIM_SETTINGS=/path/to/openrouter-settings.json bin/codex-openrouter .
+CODEX_SHIM_MODEL=openrouter-owl-alpha codex-shim run openrouter .
+codex-shim --port 8770 openrouter .
 ```
+
+`bin/codex-openrouter` remains available as a shortcut for this workflow.
 
 That command uses temporary inline `-c` overrides only. To verify your normal
 Codex config was not touched, compare the file before and after:
@@ -306,13 +309,14 @@ missing, empty, or still has the placeholder API key, it prompts for your Token
 Plan key and model and writes the ignored local settings file.
 
 ```bash
-bin/codex-minimax .
+codex-shim setup minimax
+codex-shim minimax .
 ```
 
 To change the stored MiniMax model, key, or base URL later:
 
 ```bash
-bin/codex-minimax setup
+codex-shim setup minimax
 ```
 
 The setup prompt shows current values and lets Enter keep them. The API key is
@@ -322,10 +326,11 @@ For MiniMax's China endpoint, change the base URL to `https://api.minimaxi.com/v
 Optional overrides:
 
 ```bash
-CODEX_SHIM_MODEL=minimax-m2-7 bin/codex-minimax .
-CODEX_SHIM_PORT=8771 bin/codex-minimax .
-CODEX_SHIM_SETTINGS=/path/to/minimax-settings.json bin/codex-minimax .
+CODEX_SHIM_MODEL=minimax-m2-7 codex-shim run minimax .
+codex-shim --port 8771 minimax .
 ```
+
+`bin/codex-minimax` remains available as a shortcut for this workflow.
 
 That command uses temporary inline `-c` overrides only. To verify your normal
 Codex config was not touched, compare the file before and after:
@@ -481,6 +486,10 @@ codex-shim model list       list slugs currently usable in the picker
 codex-shim model use <slug> set the Desktop default model in managed config
 codex-shim codex -- <args>  exec `codex` CLI through temporary -c overrides
 codex-shim app [path]       install managed config and launch Codex Desktop
+codex-shim provider list    list built-in provider setup workflows
+codex-shim setup <provider> configure an ignored local provider settings file
+codex-shim run <provider> . start shim and run Codex through that provider
+codex-shim <provider> .     shortcut for `codex-shim run <provider> .`
 
 codex-app [path]            shortcut for `codex-shim app`
 codex-model [list|<slug>]   shortcut for `codex-shim model …`
