@@ -38,6 +38,15 @@ def responses_to_chat(body: dict[str, Any], upstream_model: str) -> dict[str, An
             continue
         messages.append(m)
 
+    # Normalize non-standard roles (e.g. developer → system) for strict providers.
+    messages = _normalize_roles(messages)
+    # Merge consecutive same-role messages that can occur after dropping
+    # reasoning items or role normalization.
+    messages = _merge_consecutive_messages(messages)
+    # Sanitize for strict OpenAI-compatible providers (Kimi, etc.):
+    # ensure content fields are strings, strip NUL bytes, remove internal keys.
+    messages = _sanitize_chat_messages(messages)
+
     chat: dict[str, Any] = {
         "model": upstream_model,
         "messages": messages or [{"role": "user", "content": ""}],
@@ -407,3 +416,118 @@ def _jsonish(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, separators=(",", ":"))
+
+
+def _sanitize_string(value: str) -> str:
+    """Remove NUL bytes and other control characters that trip up tokenizers."""
+    # Strip NUL bytes (common in binary file reads)
+    value = value.replace("\x00", "")
+    # Strip other problematic control chars (keep \n, \r, \t and all printable/unicode)
+    return "".join(c for c in value if c in "\n\r\t" or ord(c) >= 0x20)
+
+
+def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Clean messages for strict OpenAI-compatible providers.
+
+    Ensures content is always a string (not a list/dict), strips NUL bytes
+    and internal marker keys, and validates tool_calls format.
+    """
+    cleaned = []
+    for msg in messages:
+        m = dict(msg)
+        # Remove internal marker keys
+        m.pop("_reasoning_only", None)
+        m.pop("encrypted_content", None)
+        m.pop("summary", None)
+
+        role = m.get("role", "user")
+        content = m.get("content")
+
+        # Ensure content is a string for non-assistant messages
+        if role != "assistant":
+            if content is None:
+                m["content"] = ""
+            elif not isinstance(content, str):
+                m["content"] = _content_to_text(content)
+            m["content"] = _sanitize_string(m["content"])
+        else:
+            # Assistant messages: content can be string or null (when tool_calls present)
+            if content is not None:
+                if not isinstance(content, str):
+                    content = _content_to_text(content)
+                m["content"] = _sanitize_string(content)
+
+            # Sanitize tool_calls arguments (deep copy to avoid mutating originals)
+            orig_calls = m.get("tool_calls")
+            if orig_calls:
+                new_calls = []
+                for tc in orig_calls:
+                    tc = dict(tc)
+                    fn = tc.get("function")
+                    if fn:
+                        fn = dict(fn)
+                        args = fn.get("arguments")
+                        if args and isinstance(args, str):
+                            fn["arguments"] = _sanitize_string(args)
+                        tc["function"] = fn
+                    new_calls.append(tc)
+                m["tool_calls"] = new_calls
+
+        # For tool role, sanitize tool_call_id
+        if role == "tool":
+            tcid = m.get("tool_call_id")
+            if tcid and isinstance(tcid, str):
+                m["tool_call_id"] = _sanitize_string(tcid)
+
+        cleaned.append(m)
+    return cleaned
+
+
+def _normalize_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert non-standard roles to standard ones for strict providers.
+
+    - ``developer`` → ``system`` (OpenAI-specific role Kimi doesn't support)
+    """
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "developer":
+            m = dict(m)
+            m["role"] = "system"
+        out.append(m)
+    return out
+
+
+def _merge_consecutive_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive same-role messages that can arise after dropping reasoning
+    or role normalization.
+
+    Some providers (Kimi) reject consecutive messages with the same role.
+    Merges system+system, user+user, and assistant+assistant.
+    """
+    if not messages:
+        return messages
+    merged: list[dict[str, Any]] = [messages[0]]
+    for msg in messages[1:]:
+        prev = merged[-1]
+        prev_role = prev.get("role")
+        msg_role = msg.get("role")
+        if msg_role == prev_role and msg_role in {"system", "user", "assistant"}:
+            # Merge text content
+            prev_content = prev.get("content") or ""
+            new_content = msg.get("content") or ""
+            if prev_content and new_content:
+                prev["content"] = prev_content + "\n\n" + new_content
+            elif new_content:
+                prev["content"] = new_content
+
+            # Merge tool_calls (only relevant for assistant)
+            if msg_role == "assistant":
+                prev_calls = prev.get("tool_calls") or []
+                new_calls = msg.get("tool_calls") or []
+                if new_calls:
+                    combined = list(prev_calls) + list(new_calls)
+                    prev["tool_calls"] = combined
+        else:
+            merged.append(msg)
+    return merged
