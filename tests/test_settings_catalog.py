@@ -104,6 +104,29 @@ def test_minimax_provider_uses_openai_chat_translation(tmp_path):
     assert model.is_openai_chat is True
 
 
+def test_anthropic_oauth_provider_routes_as_anthropic(tmp_path):
+    settings = tmp_path / "anthropic-oauth-models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "claude-opus-4-7",
+                        "display_name": "Claude Opus 4.7 (OAuth)",
+                        "provider": "anthropic-oauth",
+                        "base_url": "https://api.anthropic.com/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.is_anthropic is True
+    assert model.is_openai_chat is False
+
+
 def test_catalog_preserves_context_and_visibility():
     model = ModelSettingsFixture.one()
     entry = catalog_entry(model)
@@ -320,3 +343,54 @@ class ModelSettingsFixture:
             )
         )
         return ModelSettings(path).load()[0]
+
+
+def test_anthropic_oauth_setup_writes_keyless_settings(tmp_path, monkeypatch):
+    settings = tmp_path / "anthropic-oauth-models.json"
+    spec = cli.ProviderSpec(
+        name="anthropic-oauth",
+        title="Claude Code OAuth",
+        settings_path=settings,
+        port=8768,
+        placeholder_key="",
+        default_model="claude-opus-4-7",
+        default_display_name="Claude Opus 4.7",
+        default_provider="anthropic-oauth",
+        default_base_url="https://api.anthropic.com/v1",
+        default_context=1000000,
+        allowed_providers=frozenset({"anthropic-oauth"}),
+        template_path=tmp_path / "example.json",
+        requires_api_key=False,
+    )
+    monkeypatch.setitem(cli.PROVIDER_SPECS, "anthropic-oauth", spec)
+
+    assert cli.setup_provider("anthropic-oauth") == 0
+
+    models = json.loads(settings.read_text())["models"]
+    assert [m["model"] for m in models] == ["claude-opus-4-7", "claude-sonnet-4-6"]
+    assert all(m["provider"] == "anthropic-oauth" for m in models)
+    assert all("api_key" not in m for m in models)
+
+
+def test_anthropic_oauth_setup_works_non_interactively(tmp_path, monkeypatch):
+    settings = tmp_path / "anthropic-oauth-models.json"
+    spec = cli.ProviderSpec(
+        name="anthropic-oauth",
+        title="Claude Code OAuth",
+        settings_path=settings,
+        port=8768,
+        placeholder_key="",
+        default_model="claude-opus-4-7",
+        default_display_name="Claude Opus 4.7",
+        default_provider="anthropic-oauth",
+        default_base_url="https://api.anthropic.com/v1",
+        default_context=1000000,
+        allowed_providers=frozenset({"anthropic-oauth"}),
+        template_path=tmp_path / "example.json",
+        requires_api_key=False,
+    )
+    monkeypatch.setitem(cli.PROVIDER_SPECS, "anthropic-oauth", spec)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+
+    assert cli.setup_provider("anthropic-oauth") == 0
+    assert settings.exists()

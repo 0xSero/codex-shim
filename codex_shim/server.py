@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import time
 from pathlib import Path
@@ -978,10 +979,44 @@ def _anthropic_headers(route: ShimModel) -> dict[str, str]:
         "anthropic-version": "2023-06-01",
         **route.extra_headers,
     }
+    if route.provider == "anthropic-oauth":
+        headers["Authorization"] = f"Bearer {_claude_code_oauth_access_token()}"
+        return headers
     if route.api_key:
         headers.setdefault("x-api-key", route.api_key)
         headers.setdefault("Authorization", f"Bearer {route.api_key}")
     return headers
+
+
+def _claude_code_oauth_access_token() -> str:
+    auth_path = Path.home() / ".claude" / ".credentials.json"
+    try:
+        auth = json.loads(auth_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        raise web.HTTPUnauthorized(
+            text="Claude Code credentials not found; run `claude` and log in first."
+        ) from exc
+    oauth = auth.get("claudeAiOauth") or {}
+    token = str(oauth.get("accessToken") or "")
+    if not token:
+        raise web.HTTPUnauthorized(
+            text="Claude Code credentials have no access token; run `claude` and log in again."
+        )
+    expires_at = _parse_int(oauth.get("expiresAt"))
+    if expires_at is not None:
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        if expires_at <= now_ms + 60_000:
+            raise web.HTTPUnauthorized(
+                text="Claude Code OAuth token is expired or near expiry; run `claude` to refresh."
+            )
+    return token
+
+
+def _parse_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sse_response() -> web.StreamResponse:

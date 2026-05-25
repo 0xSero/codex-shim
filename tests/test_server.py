@@ -6,7 +6,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from codex_shim.server import ShimServer, _rewrite_response_model, _sanitize_chatgpt_passthrough_body
+from codex_shim.server import ShimServer, _rewrite_response_model, _sanitize_chatgpt_passthrough_body, _anthropic_headers, _claude_code_oauth_access_token
+from codex_shim.settings import ShimModel
 from codex_shim.translate import SHIM_ENCRYPTED_CONTENT_PREFIX
 
 
@@ -339,3 +340,28 @@ async def test_chat_routes_to_anthropic(tmp_path):
     await shim_client.close()
     await upstream_client.close()
 
+
+
+def test_anthropic_oauth_headers_inject_bearer_not_x_api_key(monkeypatch):
+    route = ShimModel(
+        slug="claude-opus-4-7",
+        model="claude-opus-4-7",
+        display_name="Claude Opus 4.7 (OAuth)",
+        provider="anthropic-oauth",
+        base_url="https://api.anthropic.com/v1",
+    )
+
+    monkeypatch.setattr("codex_shim.server._claude_code_oauth_access_token", lambda: "test-oauth-token")
+
+    headers = _anthropic_headers(route)
+
+    assert headers["Authorization"] == "Bearer test-oauth-token"
+    assert "x-api-key" not in headers
+
+
+def test_claude_code_oauth_token_raises_on_missing_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    import pytest
+    with pytest.raises(Exception):
+        _claude_code_oauth_access_token()

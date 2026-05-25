@@ -58,6 +58,7 @@ class ProviderSpec:
     default_context: int
     allowed_providers: frozenset[str]
     template_path: Path
+    requires_api_key: bool = True
 
 
 PROVIDER_SPECS = {
@@ -88,6 +89,21 @@ PROVIDER_SPECS = {
         default_context=1000000,
         allowed_providers=frozenset({"minimax", "generic-chat-completion-api", "openai"}),
         template_path=PROJECT_ROOT / "examples" / "minimax-models.example.json",
+    ),
+    "anthropic-oauth": ProviderSpec(
+        name="anthropic-oauth",
+        title="Claude Code OAuth",
+        settings_path=DEFAULT_SETTINGS.parent / "anthropic-oauth-models.json",
+        port=8768,
+        placeholder_key="",
+        default_model="claude-opus-4-7",
+        default_display_name="Claude Opus 4.7",
+        default_provider="anthropic-oauth",
+        default_base_url="https://api.anthropic.com/v1",
+        default_context=1000000,
+        allowed_providers=frozenset({"anthropic-oauth"}),
+        template_path=PROJECT_ROOT / "examples" / "anthropic-oauth-models.example.json",
+        requires_api_key=False,
     ),
 }
 
@@ -261,12 +277,17 @@ def _provider_settings_status(spec: ProviderSpec) -> str:
         return "unsupported_provider"
     if not model.base_url:
         return "missing_base_url"
-    if not model.api_key or model.api_key == spec.placeholder_key:
+    if spec.requires_api_key and (not model.api_key or model.api_key == spec.placeholder_key):
         return "missing_key"
     return "ok"
 
 
 def _prompt_provider_setup(spec: ProviderSpec, status: str) -> None:
+    if not spec.requires_api_key:
+        _write_anthropic_oauth_settings(spec)
+        print(f"Wrote {spec.settings_path}", file=sys.stderr)
+        return
+
     if not sys.stdin.isatty():
         print(
             f"{spec.title} settings are not configured ({status}):\n"
@@ -363,6 +384,39 @@ def _write_provider_settings(
                     "display_name": display_name,
                     "max_context_limit": context,
                 }
+            ]
+        }
+        spec.settings_path.write_text(json.dumps(payload, indent=2) + "\n")
+    finally:
+        os.umask(old_umask)
+
+
+def _write_anthropic_oauth_settings(spec: ProviderSpec) -> None:
+    spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        spec.settings_path.parent.chmod(0o700)
+    except OSError:
+        pass
+    old_umask = os.umask(0o077)
+    try:
+        payload = {
+            "models": [
+                {
+                    "model": "claude-opus-4-7",
+                    "provider": "anthropic-oauth",
+                    "base_url": "https://api.anthropic.com/v1",
+                    "display_name": "Claude Opus 4.7 (OAuth)",
+                    "max_context_limit": 1000000,
+                    "max_output_tokens": 32000,
+                },
+                {
+                    "model": "claude-sonnet-4-6",
+                    "provider": "anthropic-oauth",
+                    "base_url": "https://api.anthropic.com/v1",
+                    "display_name": "Claude Sonnet 4.6 (OAuth)",
+                    "max_context_limit": 200000,
+                    "max_output_tokens": 32000,
+                },
             ]
         }
         spec.settings_path.write_text(json.dumps(payload, indent=2) + "\n")

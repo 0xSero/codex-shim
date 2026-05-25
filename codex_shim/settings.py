@@ -59,7 +59,7 @@ class ShimModel:
 
     @property
     def is_anthropic(self) -> bool:
-        return self.provider == "anthropic"
+        return self.provider in {"anthropic", "anthropic-oauth"}
 
     @property
     def is_openai_chat(self) -> bool:
