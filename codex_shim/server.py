@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+from .hostguard import build_allowed_hosts, host_guard_middleware
 from .settings import (
     CHATGPT_MODEL_SLUG,
     DEFAULT_CODEX_AUTH,
@@ -31,12 +32,17 @@ from .translate import (
 
 
 class ShimServer:
-    def __init__(self, settings_path: Path = DEFAULT_SETTINGS):
+    def __init__(self, settings_path: Path = DEFAULT_SETTINGS, host: str = DEFAULT_HOST):
         self.settings = ModelSettings(settings_path)
+        self.host = host
         self.timeout = ClientTimeout(total=None, sock_connect=120, sock_read=None)
 
     def app(self) -> web.Application:
-        app = web.Application(client_max_size=64 * 1024 * 1024)
+        allowed_hosts = build_allowed_hosts(self.host)
+        app = web.Application(
+            client_max_size=64 * 1024 * 1024,
+            middlewares=[host_guard_middleware(allowed_hosts)],
+        )
         app.router.add_get("/health", self.health)
         app.router.add_get("/v1/models", self.models)
         app.router.add_post("/v1/chat/completions", self.chat_completions)
@@ -1109,7 +1115,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
 
-    shim = ShimServer(args.settings)
+    shim = ShimServer(args.settings, host=args.host)
     web.run_app(shim.app(), host=args.host, port=args.port, handle_signals=True)
 
 

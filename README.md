@@ -717,6 +717,13 @@ use `--settings`, and exit with a clear error on Windows/Linux.
 ## Security and privacy
 
 - The shim binds to `127.0.0.1` by default.
+- The shim validates the `Host` header on every request and rejects anything
+  that is not a loopback name (`127.0.0.1`, `localhost`, `::1`), the configured
+  bind host, or an entry in `CODEX_SHIM_ALLOWED_HOSTS`. This blocks DNS-rebinding
+  attacks where a web page you visit resolves its own domain to `127.0.0.1` and
+  drives the shim with your credentials. If you deliberately bind to a
+  non-loopback host, add the host(s) you reach it by to
+  `CODEX_SHIM_ALLOWED_HOSTS` (comma-separated).
 - API keys stay in your settings file; the generated catalog does not contain
   them.
 - Request logs are summary-level by default and avoid full prompt/API-key dumps.
