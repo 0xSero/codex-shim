@@ -389,7 +389,14 @@ that hides any model whose slug is not on a hardcoded list. Custom catalog
 entries fall into the hidden bucket and never render in the picker.
 
 A single-boolean ASAR patch flips the allowlist branch off so the picker only
-checks the local `hidden` flag (which this catalog never sets).
+checks the local `hidden` flag (which this catalog never sets). On recent
+Codex Desktop builds, the patch also changes the local recent-thread loader
+from `modelProviders: null` to `modelProviders: []` so the sidebar continues to
+show existing native `openai` chats while Desktop is routed through the
+`codex_shim` provider.
+
+The combined patch has been tested on Codex Desktop **26.519.41501** /
+`codex-cli 0.133.0-alpha.1` on macOS arm64.
 
 > Back up `app.asar` and `Info.plist` before patching.
 
@@ -407,7 +414,22 @@ sed -i.bak -E 's/let u=c\.useHiddenModels&&o!==`amazonBedrock`,d;/let u=!1,d;/' 
 diff "$PATCH_FILE.bak" "$PATCH_FILE" || true
 rm "$PATCH_FILE.bak"
 
-# 3. Repack
+# 3. Patch the sidebar recent-thread provider filter (single occurrence)
+SIDEBAR_FILE=$(grep -RIl 'listRecentThreads' extracted/webview/assets/app-server-manager-signals-*.js | head -n1)
+python3 - "$SIDEBAR_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:ke})}"
+new = "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:ke})}"
+if text.count(old) != 1:
+    raise SystemExit("expected one sidebar provider filter occurrence")
+path.write_text(text.replace(old, new, 1))
+PY
+
+# 4. Repack
 npx --yes @electron/asar pack extracted app.asar.new
 sudo cp app.asar.new "$APP/Contents/Resources/app.asar"
 ```
@@ -417,7 +439,7 @@ That alone can crash Codex on next launch with `EXC_BREAKPOINT`. Electron's
 header** of the ASAR archive (not the whole file). Recompute it and re-sign:
 
 ```bash
-# 4. Compute new header hash
+# 5. Compute new header hash
 HEADER_HASH=$(python3 - "$APP/Contents/Resources/app.asar" <<'PY'
 import struct, hashlib, sys
 with open(sys.argv[1], 'rb') as f:
@@ -428,29 +450,30 @@ PY
 )
 echo "new header hash: $HEADER_HASH"
 
-# 5. Patch Info.plist (replaces the hash for Resources/app.asar)
+# 6. Patch Info.plist (replaces the hash for Resources/app.asar)
 sudo /usr/libexec/PlistBuddy -c \
   "Set :ElectronAsarIntegrity:Resources/app.asar:hash $HEADER_HASH" \
   "$APP/Contents/Info.plist"
 
-# 6. Ad-hoc re-sign
+# 7. Ad-hoc re-sign
 sudo codesign --force --deep --sign - "$APP"
 
-# 7. Launch
+# 8. Launch
 open "$APP"
 ```
 
 To roll back: `sudo rm -rf "$APP" && sudo mv "$APP.unpatched-…" "$APP"`.
 
-The CLI also has helper commands for patching/restoring `app.asar`:
+The CLI also has helper commands for patching/restoring `app.asar` and the
+matching ASAR integrity metadata:
 
 ```bash
 codex-shim patch-app
 codex-shim restore-app
 ```
 
-If Codex still crashes after `patch-app`, use the manual hash-update steps above
-or restore with `codex-shim restore-app`.
+If Codex still crashes after `patch-app`, restore with `codex-shim restore-app`
+and re-check the manual patch needles against the installed Desktop build.
 
 ---
 

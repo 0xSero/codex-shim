@@ -28,6 +28,16 @@ and this project does not yet follow semantic versioning (pre-1.0).
   while still accepting `customModels` and camelCase aliases for existing
   exports.
 
+### Fixed
+
+- `codex-shim patch-app` now also patches the Codex Desktop sidebar's recent
+  thread loader so native `openai` chats remain visible while Desktop is routed
+  through the `codex_shim` provider. Tested on Codex Desktop 26.519.41501 /
+  `codex-cli 0.133.0-alpha.1` on macOS arm64.
+- `patch-app` now updates `ElectronAsarIntegrity` in `Info.plist` after
+  repacking `app.asar`, and `restore-app` restores or recomputes that metadata
+  before re-signing the app bundle.
+
 ## 2026-05-25 — Auth-gated ChatGPT passthrough + docs hardening
 
 ### Added

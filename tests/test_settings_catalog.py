@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import plistlib
+import struct
 
 import pytest
 
@@ -273,6 +276,44 @@ def test_restore_app_fails_off_macos(monkeypatch, capsys):
 
     assert cli.restore_codex_app_bundle() == 1
     assert "macOS-only" in capsys.readouterr().err
+
+
+def test_desktop_bundle_patch_applies_model_picker_and_sidebar(tmp_path):
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    model_bundle = assets / "model-queries-test.js"
+    sidebar_bundle = assets / "app-server-manager-signals-test.js"
+    model_bundle.write_text(f"before {cli.MODEL_PICKER_NEEDLE} after")
+    sidebar_bundle.write_text(f"before {cli.SIDEBAR_RECENT_THREADS_NEEDLE} after")
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is True
+    assert cli.MODEL_PICKER_REPLACEMENT in model_bundle.read_text()
+    assert cli.SIDEBAR_RECENT_THREADS_REPLACEMENT in sidebar_bundle.read_text()
+    assert cli._patch_codex_desktop_bundles(tmp_path) is False
+
+
+def test_desktop_bundle_patch_fails_when_sidebar_needle_is_missing(tmp_path):
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "model-queries-test.js").write_text(cli.MODEL_PICKER_NEEDLE)
+    (assets / "app-server-manager-signals-test.js").write_text("different build")
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is None
+
+
+def test_update_app_asar_integrity_uses_asar_json_header_hash(tmp_path):
+    header_json = b'{"files":{"x":{"offset":"0","size":1}}}'
+    app_asar = tmp_path / "app.asar"
+    app_asar.write_bytes(struct.pack("<4I", 4, len(header_json), 0, len(header_json)) + header_json + b"x")
+    info_plist = tmp_path / "Info.plist"
+    info_plist.write_bytes(
+        plistlib.dumps({"ElectronAsarIntegrity": {"Resources/app.asar": {"hash": "old"}}})
+    )
+
+    cli._update_app_asar_integrity(app_asar, info_plist)
+
+    data = plistlib.loads(info_plist.read_bytes())
+    assert data["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] == hashlib.sha256(header_json).hexdigest()
 
 
 class ModelSettingsFixture:
