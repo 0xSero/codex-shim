@@ -121,6 +121,105 @@ def test_responses_to_anthropic_messages():
     assert out["messages"] == [{"role": "user", "content": "Hi"}]
 
 
+def test_responses_to_chat_preserves_input_images_for_vision_models():
+    body = {
+        "model": "slug",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is visible?"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAA", "detail": "high"},
+                ],
+            }
+        ],
+    }
+
+    out = responses_to_chat(body, "vision-model")
+
+    assert out["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is visible?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA", "detail": "high"}},
+            ],
+        }
+    ]
+
+
+def test_computer_call_output_screenshot_reaches_openai_chat_vision():
+    body = {
+        "model": "slug",
+        "input": [
+            {"type": "computer_call_output", "call_id": "cu_1", "output": {"type": "input_image", "image_url": "data:image/png;base64,BBB"}}
+        ],
+    }
+
+    out = responses_to_chat(body, "vision-model")
+
+    assert out["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Computer output for cu_1."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBB"}},
+            ],
+        }
+    ]
+
+
+def test_function_call_output_visual_feedback_adds_followup_image_message():
+    body = {
+        "model": "slug",
+        "input": [
+            {"type": "function_call", "call_id": "call_1", "name": "computer_use", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": [{"type": "input_image", "image_url": "data:image/png;base64,CCC"}]},
+        ],
+    }
+
+    out = responses_to_chat(body, "vision-model")
+
+    assert out["messages"][1] == {"role": "tool", "tool_call_id": "call_1", "content": "[image]"}
+    assert out["messages"][2] == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Visual tool output for call_1."},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,CCC"}},
+        ],
+    }
+
+
+def test_responses_to_anthropic_preserves_visual_feedback_as_image_blocks():
+    body = {
+        "model": "slug",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Inspect this."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,DDD"},
+                ],
+            },
+            {"type": "computer_call_output", "call_id": "cu_2", "output": {"type": "input_image", "image_url": "https://example.invalid/screen.png"}},
+        ],
+    }
+
+    out = responses_to_anthropic(body, "claude-real", 123)
+
+    assert out["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect this."},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "DDD"}},
+                {"type": "text", "text": "Computer output for cu_2."},
+                {"type": "image", "source": {"type": "url", "url": "https://example.invalid/screen.png"}},
+            ],
+        }
+    ]
+
+
 def test_chat_completion_to_response_strips_think():
     payload = {
         "id": "chatcmpl_1",

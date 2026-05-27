@@ -565,7 +565,10 @@ Native Responses-only tools now have BYOK fallbacks:
 That keeps BYOK models inside the Codex agent loop even when the upstream API is
 chat-completions or Anthropic Messages instead of native Responses. ChatGPT
 passthrough remains the highest-fidelity path for first-party hosted tool item
-shapes, but BYOK routes no longer drop those tools.
+shapes, but BYOK routes no longer drop those tools. Visual feedback is preserved
+for vision-capable BYOK providers: Responses `input_image`, `computer_call_output`
+screenshots, and visual `function_call_output` payloads become OpenAI chat
+`image_url` parts or Anthropic image blocks instead of being flattened to text.
 
 Known edge cases:
 
@@ -616,9 +619,11 @@ What that means in practice:
 
 - **Shell/file operations** are still executed by Codex Desktop/CLI. The shim
   only translates the model request and response stream.
-- **Images/screenshots** can pass to providers that accept images. Set
-  `noImageSupport: true` for text-only upstreams so Codex does not send image
-  content they cannot parse.
+- **Images/screenshots** can pass to providers that accept images. Responses
+  `input_image` items, `computer_call_output` screenshots, and visual tool
+  outputs are preserved as OpenAI chat `image_url` parts or Anthropic image
+  blocks. Set `noImageSupport: true` for text-only upstreams so Codex does not
+  send image content they cannot parse.
 - **Computer-use/native hosted tools** use native Responses item types on the
   ChatGPT passthrough path. BYOK chat/Anthropic routes receive deterministic
   function-tool fallbacks (`computer_use`, `web_search`, `apply_patch`,

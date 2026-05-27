@@ -20,6 +20,10 @@ and this project does not yet follow semantic versioning (pre-1.0).
 - Streaming `response.completed` events now include upstream `usage` when chat
   or Anthropic streams provide it, so Codex can track token counts and trigger
   auto-compaction.
+- BYOK visual feedback passthrough for computer-use loops: Responses
+  `input_image`, `computer_call_output` screenshots, and visual
+  `function_call_output` payloads now reach OpenAI chat providers as
+  `image_url` parts and Anthropic providers as image blocks.
 - GitHub Actions CI (`.github/workflows/ci.yml`) running pytest and
   `compileall` on Python 3.11 and 3.12.
 - `[project.optional-dependencies] dev` in `pyproject.toml` so

@@ -105,9 +105,9 @@ def responses_to_anthropic(body: dict[str, Any], upstream_model: str, max_tokens
             blocks: list[dict[str, Any]] = []
             blocks.extend(pending_thinking)
             pending_thinking = []
-            text = chat_msg.get("content")
-            if text:
-                blocks.append({"type": "text", "text": _content_to_text(text)})
+            content = chat_msg.get("content")
+            if content:
+                blocks.extend(_chat_content_to_anthropic_blocks(content))
             for call in chat_msg.get("tool_calls") or []:
                 fn = call.get("function") or {}
                 args_raw = fn.get("arguments") or ""
@@ -144,7 +144,7 @@ def responses_to_anthropic(body: dict[str, Any], upstream_model: str, max_tokens
             continue
         # user / anything else
         pending_thinking = []
-        append(role, _content_to_text(chat_msg.get("content", "")))
+        append(role, _chat_content_to_anthropic_content(chat_msg.get("content", "")))
 
     # If reasoning items appeared without a following assistant turn (e.g. the
     # final pending think after a tool_use round-trip), emit an assistant
@@ -281,7 +281,7 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, str):
         return [{"role": "user", "content": value}]
     if not isinstance(value, list):
-        return [{"role": "user", "content": _content_to_text(value)}]
+        return [{"role": "user", "content": _responses_content_to_chat_content(value)}]
     messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
 
@@ -303,10 +303,13 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             role = item.get("role", "user")
             if role == "developer":
                 role = "system"
-            messages.append({"role": role, "content": _content_to_text(item.get("content", ""))})
-        elif item_type in {"input_text", "text"}:
+            messages.append({"role": role, "content": _responses_content_to_chat_content(item.get("content", ""))})
+        elif item_type in {"input_text", "text", "input_image"}:
             flush_pending_assistant_tool_calls()
-            messages.append({"role": "user", "content": _content_to_text(item)})
+            messages.append({"role": "user", "content": _responses_content_to_chat_content(item)})
+        elif item_type == "computer_call_output":
+            flush_pending_assistant_tool_calls()
+            messages.append({"role": "user", "content": _computer_output_to_chat_content(item)})
         elif item_type == "function_call":
             # Coalesce consecutive function_call items into a single assistant
             # message with multiple tool_calls so chat-completions upstreams
@@ -324,7 +327,10 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             )
         elif item_type == "function_call_output":
             flush_pending_assistant_tool_calls()
-            messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": _content_to_text(item.get("output", ""))})
+            output = item.get("output", "")
+            messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": _content_to_text(output)})
+            if _has_visual_content(output):
+                messages.append({"role": "user", "content": _visual_feedback_chat_content(output, item.get("call_id"))})
         elif item_type == "reasoning":
             # For Chat-Completions upstreams reasoning is informational only.
             # We keep it as a marker so the Anthropic translator can reattach
@@ -343,6 +349,127 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _responses_content_to_chat_content(content: Any) -> str | list[dict[str, Any]]:
+    parts = _chat_parts_from_content(content)
+    if not parts:
+        return ""
+    if any(part.get("type") == "image_url" for part in parts):
+        return parts
+    return "\n".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
+
+
+def _computer_output_to_chat_content(item: dict[str, Any]) -> str | list[dict[str, Any]]:
+    call_id = item.get("call_id") or item.get("id")
+    prefix = f"Computer output for {call_id}." if call_id else "Computer output."
+    parts = _chat_parts_from_content(item.get("output", ""))
+    if any(part.get("type") == "image_url" for part in parts):
+        return [{"type": "text", "text": prefix}, *parts]
+    text = "\n".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
+    return f"{prefix}\n{text}" if text else prefix
+
+
+def _visual_feedback_chat_content(output: Any, call_id: Any) -> list[dict[str, Any]]:
+    prefix = f"Visual tool output for {call_id}." if call_id else "Visual tool output."
+    parts = [part for part in _chat_parts_from_content(output) if part.get("type") == "image_url"]
+    return [{"type": "text", "text": prefix}, *parts]
+
+
+def _chat_parts_from_content(content: Any) -> list[dict[str, Any]]:
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if isinstance(content, list):
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            parts.extend(_chat_parts_from_content(part))
+        return parts
+    if isinstance(content, dict):
+        content_type = str(content.get("type") or "")
+        if content_type in {"input_text", "output_text", "text"}:
+            text = str(content.get("text", ""))
+            return [{"type": "text", "text": text}] if text else []
+        if content_type in {"input_image", "image_url"} or "image_url" in content:
+            image = _chat_image_part(content)
+            return [image] if image else []
+        if content_type == "computer_call_output":
+            return _chat_parts_from_content(content.get("output"))
+        if "output" in content and _has_visual_content(content.get("output")):
+            return _chat_parts_from_content(content.get("output"))
+        if "content" in content:
+            return _chat_parts_from_content(content["content"])
+        if "text" in content:
+            text = str(content.get("text", ""))
+            return [{"type": "text", "text": text}] if text else []
+    return []
+
+
+def _chat_image_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    url = _image_url_from_part(part)
+    if not url:
+        return None
+    image_url: dict[str, Any] = {"url": url}
+    detail = part.get("detail") or part.get("image_detail")
+    if detail:
+        image_url["detail"] = detail
+    return {"type": "image_url", "image_url": image_url}
+
+
+def _image_url_from_part(part: dict[str, Any]) -> str:
+    image_url = part.get("image_url")
+    if isinstance(image_url, str):
+        return image_url
+    if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+        return image_url["url"]
+    for key in ("url", "file_url"):
+        value = part.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _has_visual_content(content: Any) -> bool:
+    return any(part.get("type") == "image_url" for part in _chat_parts_from_content(content))
+
+
+def _chat_content_to_anthropic_content(content: Any) -> str | list[dict[str, Any]]:
+    blocks = _chat_content_to_anthropic_blocks(content)
+    if not any(block.get("type") == "image" for block in blocks):
+        return "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
+    return blocks
+
+
+def _chat_content_to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for part in _chat_parts_from_content(content):
+        if part.get("type") == "text":
+            text = str(part.get("text", ""))
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif part.get("type") == "image_url":
+            block = _chat_image_part_to_anthropic(part)
+            if block:
+                blocks.append(block)
+    return blocks or [{"type": "text", "text": ""}]
+
+
+def _chat_image_part_to_anthropic(part: dict[str, Any]) -> dict[str, Any] | None:
+    image_url = part.get("image_url")
+    url = ""
+    if isinstance(image_url, dict):
+        url = str(image_url.get("url") or "")
+    elif isinstance(image_url, str):
+        url = image_url
+    if not url:
+        return None
+    if url.startswith("data:"):
+        match = re.match(r"data:([^;,]+);base64,(.*)", url, re.DOTALL)
+        if not match:
+            return None
+        return {"type": "image", "source": {"type": "base64", "media_type": match.group(1), "data": match.group(2)}}
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -354,10 +481,16 @@ def _content_to_text(content: Any) -> str:
             elif isinstance(part, dict):
                 if part.get("type") in {"input_text", "output_text", "text"}:
                     parts.append(str(part.get("text", "")))
+                elif part.get("type") in {"input_image", "image_url"} or "image_url" in part:
+                    parts.append("[image]")
                 elif "content" in part:
                     parts.append(_content_to_text(part["content"]))
         return "\n".join(p for p in parts if p)
     if isinstance(content, dict):
+        if content.get("type") in {"input_image", "image_url"} or "image_url" in content:
+            return "[image]"
+        if "output" in content:
+            return _content_to_text(content.get("output"))
         if "text" in content:
             return str(content.get("text", ""))
         return str(content)
@@ -547,6 +680,27 @@ def _sanitize_string(value: str) -> str:
     return "".join(char for char in value if char in "\n\r\t" or ord(char) >= 0x20)
 
 
+def _sanitize_chat_content_parts(parts: list[Any]) -> list[dict[str, Any]]:
+    cleaned = []
+    for part in parts:
+        if isinstance(part, str):
+            cleaned.append({"type": "text", "text": _sanitize_string(part)})
+            continue
+        if not isinstance(part, dict):
+            continue
+        current = dict(part)
+        if current.get("type") == "text":
+            current["text"] = _sanitize_string(str(current.get("text", "")))
+        elif current.get("type") == "image_url":
+            image_url = current.get("image_url")
+            if isinstance(image_url, dict):
+                current["image_url"] = {k: _sanitize_string(str(v)) for k, v in image_url.items() if v is not None}
+            elif isinstance(image_url, str):
+                current["image_url"] = {"url": _sanitize_string(image_url)}
+        cleaned.append(current)
+    return cleaned
+
+
 def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cleaned = []
     for message in messages:
@@ -556,16 +710,14 @@ def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
         current.pop("summary", None)
         role = current.get("role", "user")
         content = current.get("content")
-        if role != "assistant":
-            if content is None:
-                current["content"] = ""
-            elif not isinstance(content, str):
-                current["content"] = _content_to_text(content)
-            current["content"] = _sanitize_string(current["content"])
-        elif content is not None:
-            if not isinstance(content, str):
-                content = _content_to_text(content)
+        if content is None:
+            current["content"] = None if role == "assistant" else ""
+        elif isinstance(content, list):
+            current["content"] = _sanitize_chat_content_parts(content)
+        elif isinstance(content, str):
             current["content"] = _sanitize_string(content)
+        else:
+            current["content"] = _sanitize_string(_content_to_text(content))
 
         if isinstance(current.get("reasoning_content"), str):
             current["reasoning_content"] = _sanitize_string(current["reasoning_content"])
@@ -611,12 +763,7 @@ def _merge_consecutive_messages(messages: list[dict[str, Any]]) -> list[dict[str
         role = current.get("role")
         if merged and role == merged[-1].get("role") and role in {"system", "user", "assistant"}:
             previous = merged[-1]
-            previous_content = previous.get("content") or ""
-            current_content = current.get("content") or ""
-            if previous_content and current_content:
-                previous["content"] = f"{previous_content}\n\n{current_content}"
-            elif current_content:
-                previous["content"] = current_content
+            previous["content"] = _merge_chat_content(previous.get("content"), current.get("content"))
             if role == "assistant":
                 if current.get("reasoning_content") and not previous.get("reasoning_content"):
                     previous["reasoning_content"] = current["reasoning_content"]
@@ -626,3 +773,18 @@ def _merge_consecutive_messages(messages: list[dict[str, Any]]) -> list[dict[str
             continue
         merged.append(current)
     return merged
+
+
+def _merge_chat_content(left: Any, right: Any) -> Any:
+    if not left:
+        return right or ""
+    if not right:
+        return left
+    if isinstance(left, list) or isinstance(right, list):
+        merged: list[Any] = []
+        merged.extend(left if isinstance(left, list) else [{"type": "text", "text": str(left)}])
+        if merged and right:
+            merged.append({"type": "text", "text": ""})
+        merged.extend(right if isinstance(right, list) else [{"type": "text", "text": str(right)}])
+        return merged
+    return f"{left}\n\n{right}"
