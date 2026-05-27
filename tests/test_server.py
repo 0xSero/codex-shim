@@ -6,7 +6,15 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from codex_shim.server import ShimServer, _rewrite_response_model, _sanitize_chatgpt_passthrough_body
+from codex_shim import server as server_module
+from codex_shim.server import (
+    ShimServer,
+    _current_managed_model,
+    _picker_html,
+    _rewrite_response_model,
+    _sanitize_chatgpt_passthrough_body,
+    _set_active_model,
+)
 from codex_shim.translate import SHIM_ENCRYPTED_CONTENT_PREFIX
 
 
@@ -338,4 +346,198 @@ async def test_chat_routes_to_anthropic(tmp_path):
 
     await shim_client.close()
     await upstream_client.close()
+
+
+def _picker_settings_file(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "customModels": [
+                    {
+                        "model": "kimi-k26",
+                        "displayName": "Kimi K2.6",
+                        "provider": "openai",
+                        "baseUrl": "http://example.invalid/v1",
+                        "apiKey": "k",
+                    },
+                    {
+                        "model": "deepseek-v4-pro",
+                        "displayName": "DeepSeek V4 Pro",
+                        "provider": "openai",
+                        "baseUrl": "http://example.invalid/v1",
+                        "apiKey": "k",
+                    },
+                ]
+            }
+        )
+    )
+    return settings
+
+
+def _stub_codex_config(monkeypatch, tmp_path, *, model: str = "kimi-k26") -> "Path":
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'model = "{model}"\n'
+        'model_provider = "codex_shim"\n'
+        '\n'
+        '[model_providers.codex_shim]\n'
+        'name = "Codex Shim"\n'
+        'base_url = "http://127.0.0.1:8765/v1"\n'
+        'wire_api = "responses"\n'
+    )
+    monkeypatch.setattr(server_module, "CODEX_CONFIG_PATH", config)
+    return config
+
+
+def test_picker_html_renders_self_contained_page():
+    html = _picker_html()
+    assert html.startswith("<!DOCTYPE html>")
+    assert "/api/models" in html
+    assert "/api/switch" in html
+
+
+def test_current_managed_model_reads_top_level_model(monkeypatch, tmp_path):
+    _stub_codex_config(monkeypatch, tmp_path, model="deepseek-v4-pro")
+    assert _current_managed_model() == "deepseek-v4-pro"
+
+
+def test_current_managed_model_returns_none_when_config_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module, "CODEX_CONFIG_PATH", tmp_path / "nope.toml")
+    assert _current_managed_model() is None
+
+
+def test_set_active_model_rewrites_model_and_provider_name(monkeypatch, tmp_path):
+    config = _stub_codex_config(monkeypatch, tmp_path)
+    _set_active_model("deepseek-v4-pro", "DeepSeek V4 Pro")
+    text = config.read_text()
+    assert 'model = "deepseek-v4-pro"' in text
+    assert 'name = "DeepSeek V4 Pro"' in text
+
+
+def test_set_active_model_no_op_when_config_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module, "CODEX_CONFIG_PATH", tmp_path / "nope.toml")
+    # Should not raise.
+    _set_active_model("anything", "Anything")
+
+
+async def test_picker_page_served_at_picker(tmp_path, auth_missing):
+    settings = _picker_settings_file(tmp_path)
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.get("/picker")
+        assert resp.status == 200
+        text = await resp.text()
+        assert "/api/models" in text
+    finally:
+        await shim_client.close()
+
+
+async def test_api_models_lists_configured_models_with_active_flag(
+    monkeypatch, tmp_path, auth_missing
+):
+    settings = _picker_settings_file(tmp_path)
+    _stub_codex_config(monkeypatch, tmp_path, model="deepseek-v4-pro")
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.get("/api/models")
+        assert resp.status == 200
+        data = await resp.json()
+        slugs = [m["slug"] for m in data]
+        assert slugs == ["kimi-k26", "deepseek-v4-pro"]
+        active = {m["slug"]: m["active"] for m in data}
+        assert active == {"kimi-k26": False, "deepseek-v4-pro": True}
+    finally:
+        await shim_client.close()
+
+
+async def test_api_models_includes_chatgpt_when_auth_present(
+    monkeypatch, tmp_path, auth_present
+):
+    settings = _picker_settings_file(tmp_path)
+    _stub_codex_config(monkeypatch, tmp_path, model="gpt-5.5")
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.get("/api/models")
+        data = await resp.json()
+        slugs = [m["slug"] for m in data]
+        assert slugs[0] == "gpt-5.5"
+        assert data[0]["active"] is True
+    finally:
+        await shim_client.close()
+
+
+async def test_switch_model_rewrites_config_without_restart(
+    monkeypatch, tmp_path, auth_missing
+):
+    settings = _picker_settings_file(tmp_path)
+    config = _stub_codex_config(monkeypatch, tmp_path, model="kimi-k2.6")
+    restart_calls = []
+    monkeypatch.setattr(server_module, "_restart_codex_app", lambda: restart_calls.append(True))
+
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.post(
+            "/api/switch",
+            json={"slug": "deepseek-v4-pro", "restart_codex": False},
+        )
+        assert resp.status == 200
+        payload = await resp.json()
+        assert payload == {"ok": True, "model": "deepseek-v4-pro", "restarted": False}
+        text = config.read_text()
+        assert 'model = "deepseek-v4-pro"' in text
+        assert 'name = "DeepSeek V4 Pro"' in text
+        assert restart_calls == []
+    finally:
+        await shim_client.close()
+
+
+async def test_switch_model_triggers_restart_when_requested(
+    monkeypatch, tmp_path, auth_missing
+):
+    settings = _picker_settings_file(tmp_path)
+    _stub_codex_config(monkeypatch, tmp_path, model="kimi-k2.6")
+    restart_calls = []
+    monkeypatch.setattr(server_module, "_restart_codex_app", lambda: restart_calls.append(True))
+
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.post(
+            "/api/switch",
+            json={"slug": "deepseek-v4-pro", "restart_codex": True},
+        )
+        assert resp.status == 200
+        payload = await resp.json()
+        assert payload["restarted"] is True
+        assert restart_calls == [True]
+    finally:
+        await shim_client.close()
+
+
+async def test_switch_model_rejects_unknown_slug(monkeypatch, tmp_path, auth_missing):
+    settings = _picker_settings_file(tmp_path)
+    _stub_codex_config(monkeypatch, tmp_path)
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.post("/api/switch", json={"slug": "nope"})
+        assert resp.status == 404
+    finally:
+        await shim_client.close()
+
+
+async def test_switch_model_requires_slug(tmp_path, auth_missing):
+    settings = _picker_settings_file(tmp_path)
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.post("/api/switch", json={})
+        assert resp.status == 400
+    finally:
+        await shim_client.close()
 

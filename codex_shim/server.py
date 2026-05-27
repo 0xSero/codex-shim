@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from .settings import (
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    PROVIDER_NAME,
     ModelSettings,
     ShimModel,
     chatgpt_passthrough_available,
@@ -29,6 +32,9 @@ from .translate import (
     responses_to_anthropic,
     responses_to_chat,
 )
+
+DEBUG_DIR = Path(__file__).resolve().parents[1] / ".codex-shim"
+CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
 
 class ShimServer:
@@ -47,7 +53,58 @@ class ShimServer:
         app.router.add_get("/v1/models", self.models)
         app.router.add_post("/v1/chat/completions", self.chat_completions)
         app.router.add_post("/v1/responses", self.responses)
+        app.router.add_get("/picker", self.picker_page)
+        app.router.add_get("/api/models", self.api_models)
+        app.router.add_post("/api/switch", self.switch_model)
         return app
+
+    async def picker_page(self, _request: web.Request) -> web.Response:
+        return web.Response(text=_picker_html(), content_type="text/html")
+
+    async def api_models(self, _request: web.Request) -> web.Response:
+        current = _current_managed_model()
+        data: list[dict[str, Any]] = []
+        if chatgpt_passthrough_available():
+            data.append(
+                {
+                    "slug": CHATGPT_MODEL_SLUG,
+                    "display_name": "GPT-5.5",
+                    "provider": "chatgpt",
+                    "active": current == CHATGPT_MODEL_SLUG,
+                }
+            )
+        for m in self.settings.load():
+            data.append(
+                {
+                    "slug": m.slug,
+                    "display_name": m.display_name,
+                    "provider": m.provider,
+                    "active": current == m.slug,
+                }
+            )
+        return web.json_response(data)
+
+    async def switch_model(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        slug = str(body.get("slug") or "").strip()
+        if not slug:
+            return web.json_response({"error": "slug is required"}, status=400)
+        models = self.settings.load()
+        valid = {m.slug for m in models}
+        display_for: dict[str, str] = {m.slug: m.display_name for m in models}
+        if chatgpt_passthrough_available():
+            valid.add(CHATGPT_MODEL_SLUG)
+            display_for.setdefault(CHATGPT_MODEL_SLUG, "GPT-5.5")
+        if slug not in valid:
+            return web.json_response({"error": f"unknown model: {slug}"}, status=404)
+        _set_active_model(slug, display_for.get(slug, slug))
+        restart = bool(body.get("restart_codex"))
+        if restart:
+            _restart_codex_app()
+        return web.json_response({"ok": True, "model": slug, "restarted": restart})
 
     async def health(self, _request: web.Request) -> web.Response:
         models = self.settings.load()
@@ -334,10 +391,11 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
+        _dump_debug_request(route.slug, url, body)
         async with ClientSession(timeout=self.timeout) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
-                return await _error_response(upstream)
+                return await _error_response(upstream, slug=route.slug)
             if body.get("stream"):
                 return await self._stream_openai_chat(request, upstream, route, as_responses)
             payload = await upstream.json(content_type=None)
@@ -1092,8 +1150,13 @@ def _anthropic_stream_to_chat_chunk(event: dict[str, Any], model: str) -> dict[s
     return {"object": "chat.completion.chunk", "model": model, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
 
 
-async def _error_response(upstream) -> web.Response:
+async def _error_response(upstream, *, slug: str | None = None) -> web.Response:
     text = await upstream.text()
+    if slug:
+        print(
+            f"[err] upstream {slug} returned {upstream.status}: {text[:500]}",
+            flush=True,
+        )
     return web.Response(status=upstream.status, text=text, content_type=upstream.content_type or "text/plain")
 
 
@@ -1106,6 +1169,239 @@ def _normalize_roles(messages: list[dict]) -> list[dict]:
                 message["role"] = "system"
         result.append(message)
     return result
+
+
+def _dump_debug_request(slug: str, url: str, body: dict[str, Any]) -> None:
+    """Best-effort dump of the last forwarded request body for debugging.
+
+    Writes ``.codex-shim/last_request.json`` next to the rest of the runtime
+    state (catalog, pid, log). Failures are silently swallowed — this is a
+    debug aid, not a code path the request should depend on.
+    """
+    try:
+        dump_path = DEBUG_DIR / "last_request.json"
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"slug": slug, "url": url, "body": body}
+        full = json.dumps(payload, indent=2, default=str)
+        if len(full) > 2_000_000:
+            messages = body.get("messages") or []
+            summary = {
+                "slug": slug,
+                "url": url,
+                "_truncated": True,
+                "_full_size": len(full),
+                "message_count": len(messages),
+                "tool_count": len(body.get("tools") or []),
+                "last_3_messages": messages[-3:],
+            }
+            dump_path.write_text(json.dumps(summary, indent=2, default=str))
+        else:
+            dump_path.write_text(full)
+    except OSError as exc:
+        print(f"[debug] dump failed: {exc}", flush=True)
+
+
+def _current_managed_model() -> str | None:
+    """Return the first ``model = "..."`` value from ~/.codex/config.toml."""
+    if not CODEX_CONFIG_PATH.exists():
+        return None
+    try:
+        text = CODEX_CONFIG_PATH.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("model = "):
+            return stripped.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+_MODEL_LINE_RE = re.compile(r'(?m)^(\s*model\s*=\s*")[^"]*(")')
+_PROVIDER_NAME_RE = re.compile(
+    r'(\[model_providers\.' + re.escape(PROVIDER_NAME) + r'\][^\[]*?\n\s*name\s*=\s*")[^"]*(")',
+    re.DOTALL,
+)
+
+
+def _set_active_model(slug: str, display_name: str | None = None) -> None:
+    """Rewrite the active model + provider label in ~/.codex/config.toml."""
+    if not CODEX_CONFIG_PATH.exists():
+        return
+    try:
+        text = CODEX_CONFIG_PATH.read_text()
+    except OSError:
+        return
+    text = _MODEL_LINE_RE.sub(rf'\g<1>{slug}\g<2>', text, count=1)
+    if display_name:
+        text = _PROVIDER_NAME_RE.sub(rf'\g<1>{display_name}\g<2>', text, count=1)
+    try:
+        CODEX_CONFIG_PATH.write_text(text)
+    except OSError as exc:
+        print(f"[switch] failed to write {CODEX_CONFIG_PATH}: {exc}", flush=True)
+        return
+    print(f"[switch] set active model to {slug} ({display_name})", flush=True)
+
+
+def _restart_codex_app() -> None:
+    """Quit and relaunch Codex Desktop in a background thread (non-blocking).
+
+    Cross-platform: ``taskkill`` + ``Codex.exe`` on Windows, ``osascript`` +
+    ``open -a Codex`` on macOS. Linux has no Codex Desktop build today, so
+    the branch is a no-op there.
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import threading as _threading
+    import time as _time
+
+    def _do_restart() -> None:
+        try:
+            if _os.name == "nt":
+                _subprocess.run(
+                    ["taskkill", "/IM", "Codex.exe", "/F"],
+                    check=False,
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+                _time.sleep(1.5)
+                local_appdata = _os.environ.get("LOCALAPPDATA", "")
+                codex_exe = Path(local_appdata) / "Programs" / "Codex" / "Codex.exe"
+                if codex_exe.exists():
+                    _subprocess.Popen([str(codex_exe)])
+                else:
+                    _subprocess.Popen(["Codex.exe"], shell=True)
+            elif sys.platform == "darwin":
+                quit_script = 'tell application "Codex" to if it is running then quit'
+                _subprocess.run(
+                    ["osascript", "-e", quit_script],
+                    check=False,
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+                _time.sleep(1.5)
+                _subprocess.Popen(["open", "-a", "Codex"])
+        except OSError:
+            pass
+
+    _threading.Thread(target=_do_restart, daemon=True).start()
+
+
+def _picker_html() -> str:
+    return '''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Shim - Model Picker</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #c9d1d9;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 20px;
+  }
+  .container { max-width: 500px; width: 100%; }
+  h1 { font-size: 24px; margin-bottom: 8px; color: #f0f6fc; }
+  .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
+  .model-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px; margin-bottom: 12px; cursor: pointer;
+    transition: all 0.15s ease; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  .model-card:hover { border-color: #58a6ff; background: #1c2333; }
+  .model-card.active { border-color: #3fb950; background: #1a2e1a; }
+  .model-info { flex: 1; }
+  .model-name { font-size: 16px; font-weight: 600; color: #f0f6fc; }
+  .model-provider { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  .model-badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 12px;
+    font-weight: 600; text-transform: uppercase;
+  }
+  .badge-active { background: #1a4d2e; color: #3fb950; }
+  .badge-switch { background: #1c2333; color: #58a6ff; }
+  .status { text-align: center; margin-top: 16px; font-size: 14px; min-height: 20px; }
+  .status.ok { color: #3fb950; }
+  .status.err { color: #f85149; }
+  .status.loading { color: #d29922; }
+  .restart-note { color: #8b949e; font-size: 12px; text-align: center; margin-top: 8px; }
+  .opt { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; }
+  .opt label { font-size: 13px; color: #8b949e; cursor: pointer; }
+  .opt input { cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Model Picker</h1>
+  <p class="subtitle">Choose the active model for Codex Desktop</p>
+  <div id="models"><div class="status loading">Loading models...</div></div>
+  <div class="opt">
+    <input type="checkbox" id="autoRestart" checked>
+    <label for="autoRestart">Auto-restart Codex after switching</label>
+  </div>
+  <div id="status" class="status"></div>
+  <p class="restart-note">Codex needs to restart to use the new model</p>
+</div>
+<script>
+async function loadModels() {
+  const res = await fetch('/api/models');
+  const models = await res.json();
+  const container = document.getElementById('models');
+  container.innerHTML = '';
+  models.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'model-card' + (m.active ? ' active' : '');
+    const info = document.createElement('div');
+    info.className = 'model-info';
+    const name = document.createElement('div');
+    name.className = 'model-name';
+    name.textContent = m.display_name;
+    const prov = document.createElement('div');
+    prov.className = 'model-provider';
+    prov.textContent = m.provider + ' \u00b7 ' + m.slug;
+    info.appendChild(name);
+    info.appendChild(prov);
+    const badge = document.createElement('span');
+    badge.className = 'model-badge ' + (m.active ? 'badge-active' : 'badge-switch');
+    badge.textContent = m.active ? 'Active' : 'Switch';
+    card.appendChild(info);
+    card.appendChild(badge);
+    if (!m.active) {
+      card.onclick = () => switchModel(m.slug);
+    }
+    container.appendChild(card);
+  });
+}
+async function switchModel(slug) {
+  const status = document.getElementById('status');
+  const restart = document.getElementById('autoRestart').checked;
+  status.className = 'status loading';
+  status.textContent = 'Switching to ' + slug + '...';
+  try {
+    const res = await fetch('/api/switch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slug, restart_codex: restart})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      status.className = 'status ok';
+      status.textContent = 'Switched to ' + slug + (restart ? ' \u2014 Codex restarting...' : '');
+      setTimeout(loadModels, 1000);
+    } else {
+      status.className = 'status err';
+      status.textContent = data.error || 'Failed';
+    }
+  } catch(e) {
+    status.className = 'status err';
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+loadModels();
+</script>
+</body>
+</html>'''
 
 
 def main(argv: list[str] | None = None) -> None:

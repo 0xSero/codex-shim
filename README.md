@@ -737,6 +737,26 @@ use `--settings`, and exit with a clear error on Windows/Linux.
 
 ---
 
+## Model picker (web UI)
+
+The shim exposes a small browser UI for switching the active model without
+restarting the CLI:
+
+- `GET /picker` — self-contained HTML page (dark theme) listing every model
+  the shim currently knows about, with the active one highlighted.
+- `GET /api/models` — JSON list backing the picker.
+- `POST /api/switch` — `{"slug": "...", "restart_codex": true|false}`. The
+  shim rewrites `model = "..."` and the `[model_providers.codex_shim]`
+  `name = "..."` in `~/.codex/config.toml` so the Codex Desktop UI shows
+  the selected model's display name (e.g. "Kimi K2.6") instead of the
+  generic "Codex Shim" label, and optionally relaunches Codex Desktop
+  (`open -a Codex` on macOS, `taskkill` + `Codex.exe` on Windows).
+
+All picker routes are behind the same `Host`-header allowlist as the rest of
+the shim, so a visited web page cannot drive them via DNS rebinding.
+
+---
+
 ## Security and privacy
 
 - The shim binds to `127.0.0.1` by default.

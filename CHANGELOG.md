@@ -17,6 +17,20 @@ and this project does not yet follow semantic versioning (pre-1.0).
   and what to include in bug reports.
 - `.github/ISSUE_TEMPLATE/` with structured bug and feature request templates.
 - `CHANGELOG.md` (this file).
+- Web-based model picker at `GET /picker` (with `GET /api/models` and
+  `POST /api/switch`) so the active shim model can be swapped from a browser
+  without the CLI. Switching rewrites `model = "..."` and the
+  `[model_providers.codex_shim]` `name = "..."` in `~/.codex/config.toml` so
+  the Codex Desktop UI shows the selected model name (e.g. "Kimi K2.6")
+  instead of the generic "Codex Shim" label. Optional auto-restart of Codex
+  Desktop is cross-platform (`taskkill` + `Codex.exe` on Windows,
+  `osascript` + `open -a Codex` on macOS). All picker routes are behind the
+  existing `Host`-header allowlist, so a visited web page still cannot drive
+  them via DNS rebinding.
+- Best-effort dump of the last forwarded chat-completions request body to
+  `.codex-shim/last_request.json` to make strict-provider tokenization /
+  schema errors easier to triage. Upstream error bodies are now logged with
+  the model slug before being forwarded back.
 
 ### Changed
 
