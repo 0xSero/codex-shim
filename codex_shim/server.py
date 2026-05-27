@@ -553,6 +553,7 @@ class ResponsesStreamState:
         self.message_text = ""
         self.message_opened = False
         self.message_closed = False
+        self.usage: dict[str, Any] | None = None
         # Tool call state, keyed by upstream "index" (chat-completions) or
         # anthropic content_block_index. Each entry tracks its assigned
         # output_index, accumulated arguments, name, etc.
@@ -586,6 +587,9 @@ class ResponsesStreamState:
         choice = (chunk.get("choices") or [{}])[0]
         delta = choice.get("delta") or {}
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            self.usage = usage
         if reasoning:
             await self._chat_reasoning_delta(response, reasoning)
         content = delta.get("content")
@@ -708,6 +712,13 @@ class ResponsesStreamState:
                 if state is None:
                     state = await self._open_reasoning(response, key=("anthropic_thinking", idx))
                 state["signature"] += delta.get("signature") or ""
+        elif event_type == "message_delta":
+            delta = event.get("delta") or {}
+            stop_reason = delta.get("stop_reason")
+            # Capture usage if present on message_delta
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                self.usage = usage
         elif event_type == "content_block_stop":
             idx = int(event.get("index", 0))
             tool_state = self.tool_calls.get(("anthropic", idx))
@@ -993,6 +1004,7 @@ class ResponsesStreamState:
             "status": status,
             "model": self.model,
             "output": output,
+            "usage": self.usage,
         }
 
 
