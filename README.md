@@ -35,6 +35,10 @@ local:
 - **ChatGPT/Codex passthrough.** If `~/.codex/auth.json` has a valid Codex
   access token, the shim can route Codex's native `/v1/responses` traffic to
   ChatGPT's Codex backend under the `gpt-5.5` slug used by current Codex builds.
+- **Cursor/Composer passthrough.** If `cursor-agent login` is active, the shim
+  exposes `composer-2-5` and routes through your Cursor subscription — no
+  Dashboard API key (`crsr_…`) required. See
+  [`docs/subscription-integration.md`](docs/subscription-integration.md).
 - **Prompt-catching/proxy-friendly architecture.** Put a local proxy in front
   of the shim to dedupe boilerplate, inject stable instructions, repair
   pseudo-tool text, or route prompts by policy before they hit an upstream.
@@ -507,6 +511,31 @@ codex-model gpt-5.5
 
 Older local configs or notes may refer to `openai-gpt-5-5`; the server accepts
 that prefix as an alias and routes it to the same passthrough.
+
+---
+
+## Cursor/Composer passthrough (subscription)
+
+If `cursor-agent status` shows you are logged in, the shim exposes
+**Composer 2.5** as slug `composer-2-5` and routes each request by spawning
+`cursor-agent` with your CLI OAuth session — the same pattern
+[Open Design](https://github.com/nexu-io/open-design) uses for Cursor Agent.
+
+```bash
+cursor-agent login
+- `scripts/codex-shim-install-cursor-composer` — optional helper to wire Composer via subscription
+codex-shim model use composer-2-5
+codex-app
+```
+
+Full architecture, Open Design cross-references, troubleshooting, and a
+GitHub Pages publishing template:
+
+→ **[docs/subscription-integration.md](docs/subscription-integration.md)**
+
+Do **not** configure Composer via `cursor-api.standardagents.ai` unless you
+intentionally want Dashboard API-key billing (`crsr_…`). That path is BYOK,
+not CLI subscription.
 
 ---
 

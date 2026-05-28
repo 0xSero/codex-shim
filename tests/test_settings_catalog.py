@@ -9,7 +9,7 @@ import pytest
 
 from codex_shim import cli
 from codex_shim.catalog import catalog_entry, write_catalog
-from codex_shim.settings import ModelSettings, chatgpt_passthrough_available
+from codex_shim.settings import ModelSettings, chatgpt_passthrough_available, FALLBACK_CHATGPT_PASSTHROUGH_SLUGS
 
 
 @pytest.fixture
@@ -162,11 +162,13 @@ def test_write_catalog_omits_gpt55_when_auth_missing(tmp_path, auth_missing):
     assert data == {"models": []}
 
 
-def test_write_catalog_includes_gpt55_when_auth_present(tmp_path, auth_present):
+def test_write_catalog_includes_gpt_models_when_auth_present(tmp_path, auth_present, monkeypatch):
+    missing_cache = tmp_path / "missing-models-cache.json"
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CODEX_MODELS_CACHE", missing_cache)
     catalog_path = tmp_path / "catalog.json"
     write_catalog([], catalog_path)
     data = json.loads(catalog_path.read_text())
-    assert [model["slug"] for model in data["models"]] == ["gpt-5.5"]
+    assert [model["slug"] for model in data["models"]] == list(FALLBACK_CHATGPT_PASSTHROUGH_SLUGS)
 
 
 def test_managed_config_escapes_windows_catalog_path(monkeypatch):
@@ -332,6 +334,7 @@ class ModelSettingsFixture:
                             "display_name": "Claude Opus",
                             "provider": "anthropic",
                             "base_url": "http://anthropic",
+                            "apiKey": "stub",
                             "max_context_limit": 200000,
                         }
                     ]

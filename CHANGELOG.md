@@ -9,6 +9,10 @@ and this project does not yet follow semantic versioning (pre-1.0).
 
 ### Added
 
+- Cursor/Composer subscription passthrough for slug `composer-2-5`. When
+  `cursor-agent login` is active, the shim spawns `cursor-agent --print` with
+  CLI OAuth (no Dashboard API key). The slug is auth-gated in `/health`,
+  `/v1/models`, and the generated catalog like ChatGPT passthrough.
 - `POST /v1/responses/compact` support. ChatGPT passthrough forwards to the
   native ChatGPT compact endpoint; BYOK OpenAI/chat and Anthropic routes run a
   non-streaming compact summarization request and return a Responses-shaped
