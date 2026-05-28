@@ -16,6 +16,7 @@ from codex_shim.server import (
     _sanitize_chatgpt_passthrough_body,
     _set_active_model,
 )
+from codex_shim.settings import FALLBACK_CHATGPT_PASSTHROUGH_SLUGS
 from codex_shim.translate import SHIM_ENCRYPTED_CONTENT_PREFIX
 
 
@@ -267,6 +268,7 @@ async def test_streaming_openai_chat_response_completed_includes_usage(tmp_path)
                         "displayName": "Real OpenAI",
                         "provider": "openai",
                         "baseUrl": str(upstream_client.make_url("/v1")),
+                        "apiKey": "secret",
                     }
                 ]
             }
@@ -438,7 +440,9 @@ async def test_responses_compact_chatgpt_passthrough_uses_compact_endpoint(monke
     await shim_client.close()
 
 
-async def test_health_and_models_include_chatgpt_passthrough_when_auth_present(tmp_path, auth_present):
+async def test_health_and_models_include_chatgpt_passthrough_when_auth_present(tmp_path, auth_present, monkeypatch):
+    missing_cache = tmp_path / "missing-models-cache.json"
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CODEX_MODELS_CACHE", missing_cache)
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"customModels": []}))
     shim_client = TestClient(TestServer(ShimServer(settings).app()))
@@ -447,13 +451,13 @@ async def test_health_and_models_include_chatgpt_passthrough_when_auth_present(t
     health = await shim_client.get("/health")
     assert health.status == 200
     body = await health.json()
-    assert body["models"] == 1
+    assert body["models"] == len(FALLBACK_CHATGPT_PASSTHROUGH_SLUGS)
     assert body["chatgpt_passthrough"] is True
 
     models = await shim_client.get("/v1/models")
     assert models.status == 200
     payload = await models.json()
-    assert [model["id"] for model in payload["data"]] == ["gpt-5.5"]
+    assert sorted(model["id"] for model in payload["data"]) == sorted(FALLBACK_CHATGPT_PASSTHROUGH_SLUGS)
 
     await shim_client.close()
 
@@ -468,6 +472,64 @@ async def test_health_and_models_hide_chatgpt_passthrough_when_auth_missing(tmp_
     body = await health.json()
     assert body["models"] == 0
     assert body["chatgpt_passthrough"] is False
+
+    models = await shim_client.get("/v1/models")
+    payload = await models.json()
+    assert payload["data"] == []
+
+    await shim_client.close()
+
+
+@pytest.fixture
+def cursor_present(monkeypatch):
+    def _on(**_kwargs):
+        return True
+
+    for target in (
+        "codex_shim.cursor_passthrough.cursor_passthrough_available",
+        "codex_shim.server.cursor_passthrough_available",
+        "codex_shim.catalog.cursor_passthrough_available",
+        "codex_shim.cli.cursor_passthrough_available",
+    ):
+        monkeypatch.setattr(target, _on)
+
+
+@pytest.fixture
+def cursor_missing(monkeypatch):
+    monkeypatch.setattr("codex_shim.cursor_passthrough.cursor_passthrough_available", lambda **_: False)
+    monkeypatch.setattr("codex_shim.server.cursor_passthrough_available", lambda **_: False)
+    monkeypatch.setattr("codex_shim.catalog.cursor_passthrough_available", lambda **_: False)
+
+
+async def test_health_and_models_include_cursor_passthrough_when_auth_present(tmp_path, cursor_present, auth_missing):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"customModels": []}))
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+
+    health = await shim_client.get("/health")
+    assert health.status == 200
+    body = await health.json()
+    assert body["models"] == 1
+    assert body["cursor_passthrough"] is True
+
+    models = await shim_client.get("/v1/models")
+    payload = await models.json()
+    assert [model["id"] for model in payload["data"]] == ["composer-2-5"]
+
+    await shim_client.close()
+
+
+async def test_health_and_models_hide_cursor_passthrough_when_auth_missing(tmp_path, cursor_missing, auth_missing):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"customModels": []}))
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+
+    health = await shim_client.get("/health")
+    body = await health.json()
+    assert body["models"] == 0
+    assert body["cursor_passthrough"] is False
 
     models = await shim_client.get("/v1/models")
     payload = await models.json()
@@ -498,6 +560,7 @@ async def test_chat_routes_to_openai_normalizes_developer_role(tmp_path):
                         "displayName": "DeepSeek Reasoner",
                         "provider": "openai",
                         "baseUrl": str(upstream_client.make_url("/v1")),
+                        "apiKey": "secret",
                     }
                 ]
             }
