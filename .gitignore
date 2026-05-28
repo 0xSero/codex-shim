@@ -4,6 +4,7 @@
 *.pid
 
 # Local Codex inspection artifacts (don't ship)
+codedb.snapshot
 *.asar
 app-asar-work/
 *-bsLDOISN.js

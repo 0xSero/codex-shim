@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from codex_shim.translate import chat_completion_to_response, responses_to_anthropic, responses_to_chat
+from codex_shim.translate import anthropic_to_response, chat_completion_to_response, responses_to_anthropic, responses_to_chat
 
 
 def test_responses_to_chat_text_input():
@@ -228,3 +228,53 @@ def test_chat_completion_to_response_strips_think():
     out = chat_completion_to_response(payload, "slug")
     assert out["model"] == "slug"
     assert out["output"][0]["content"][0]["text"] == "Hello"
+
+
+def test_chat_completion_to_response_normalizes_cached_usage():
+    payload = {
+        "id": "chatcmpl_1",
+        "choices": [{"message": {"role": "assistant", "content": "Hello"}}],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "prompt_tokens_details": {"cached_tokens": 8},
+            "completion_tokens_details": {"reasoning_tokens": 1},
+        },
+    }
+
+    out = chat_completion_to_response(payload, "slug")
+
+    assert out["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "total_tokens": 12,
+        "input_tokens_details": {"cached_tokens": 8},
+        "output_tokens_details": {"reasoning_tokens": 1},
+    }
+
+
+def test_anthropic_to_response_normalizes_cache_usage():
+    payload = {
+        "id": "msg_1",
+        "content": [{"type": "text", "text": "Hello"}],
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 8,
+            "cache_creation_input_tokens": 2,
+            "output_tokens": 3,
+        },
+    }
+
+    out = anthropic_to_response(payload, "slug")
+
+    assert out["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "total_tokens": 13,
+        "input_tokens_details": {
+            "cached_tokens": 8,
+            "cache_read_input_tokens": 8,
+            "cache_creation_input_tokens": 2,
+        },
+    }

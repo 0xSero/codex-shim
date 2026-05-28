@@ -29,6 +29,7 @@ from .translate import (
     anthropic_to_response,
     chat_completion_to_response,
     chat_to_anthropic,
+    normalize_responses_usage,
     responses_to_anthropic,
     responses_to_chat,
 )
@@ -640,7 +641,7 @@ class ResponsesStreamState:
     async def write_chat_delta(self, response: web.StreamResponse, chunk: dict[str, Any]) -> None:
         usage = chunk.get("usage")
         if isinstance(usage, dict):
-            self.usage = usage
+            self.usage = normalize_responses_usage(usage)
         choice = (chunk.get("choices") or [{}])[0]
         delta = choice.get("delta") or {}
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -699,6 +700,11 @@ class ResponsesStreamState:
     # ------------------------------------------------------------------
     async def write_anthropic_delta(self, response: web.StreamResponse, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "message_start":
+            message = event.get("message") or {}
+            usage = message.get("usage")
+            if isinstance(usage, dict):
+                self.usage = normalize_responses_usage(usage)
         if event_type == "content_block_start":
             block = event.get("content_block") or {}
             idx = int(event.get("index", 0))
@@ -769,7 +775,19 @@ class ResponsesStreamState:
         elif event_type == "message_delta":
             usage = event.get("usage")
             if isinstance(usage, dict):
-                self.usage = usage
+                if self.usage is None or any(
+                    key in usage for key in ("input_tokens", "prompt_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                ):
+                    normalized = normalize_responses_usage(usage)
+                    if normalized is not None:
+                        self.usage = normalized if self.usage is None else {**self.usage, **normalized}
+                output_tokens = usage.get("output_tokens")
+                if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+                    if self.usage is None:
+                        self.usage = normalize_responses_usage(usage)
+                    else:
+                        self.usage["output_tokens"] = output_tokens
+                        self.usage["total_tokens"] = int(self.usage.get("input_tokens") or 0) + output_tokens
         elif event_type == "content_block_stop":
             idx = int(event.get("index", 0))
             tool_state = self.tool_calls.get(("anthropic", idx))
@@ -1058,6 +1076,8 @@ class ResponsesStreamState:
         }
         if self.usage is not None:
             payload["usage"] = self.usage
+        elif final:
+            payload["usage"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         return payload
 
 
