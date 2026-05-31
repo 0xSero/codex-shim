@@ -33,6 +33,7 @@ from .translate import (
     responses_to_anthropic,
     responses_to_chat,
 )
+from .vision_router import is_vision_routing_enabled, select_model_with_vision_routing
 
 DEBUG_DIR = Path(__file__).resolve().parents[1] / ".codex-shim"
 CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
@@ -129,7 +130,7 @@ class ShimServer:
 
     async def chat_completions(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
-        route = self._route(body)
+        route, body = self._route(body)
         if route.is_openai_chat:
             forwarded = dict(body)
             forwarded["model"] = route.model
@@ -149,7 +150,7 @@ class ShimServer:
             return await self._chatgpt_passthrough(request, body)
         if self._needs_image_gen(body) or self._needs_image_followup(body):
             return await self._chatgpt_passthrough(request, body, response_model_override=model)
-        route = self._route(body)
+        route, body = self._route(body)
         if route.is_openai_chat:
             forwarded = responses_to_chat(body, route.model)
             return await self._post_openai_chat(request, route, forwarded, as_responses=True)
@@ -164,7 +165,7 @@ class ShimServer:
         model = str(body.get("model") or "")
         if model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5"):
             return await self._chatgpt_compact_passthrough(request, body)
-        route = self._route(body)
+        route, body = self._route(body)
         compact_body = _compact_request_body(body, route.model)
         if route.is_openai_chat:
             forwarded = responses_to_chat(compact_body, route.model)
@@ -434,12 +435,35 @@ class ShimServer:
         _rewrite_response_model(payload, original_model or None)
         return web.json_response(payload)
 
-    def _route(self, body: dict[str, Any]) -> ShimModel:
+    def _route(self, body: dict[str, Any]) -> tuple[ShimModel, dict[str, Any]]:
+        """
+        Route request to appropriate model.
+
+        If vision routing is enabled, intelligently selects between vision and text models.
+        Otherwise, uses the requested model directly.
+
+        Returns:
+            Tuple of (selected_model, potentially_modified_body)
+        """
         requested = str(body.get("model") or "")
+
+        # If vision routing is enabled, use smart routing
+        if is_vision_routing_enabled():
+            models = self.settings.load()
+            if not models:
+                raise web.HTTPNotFound(text="No models configured")
+
+            try:
+                route, body = select_model_with_vision_routing(body, models, default_slug=requested)
+                return route, body
+            except ValueError as e:
+                raise web.HTTPBadRequest(text=str(e))
+
+        # Default behavior: use requested model
         route = self.settings.by_slug_or_model(requested)
         if route is None:
             raise web.HTTPNotFound(text=f"Unknown model slug/model: {requested}")
-        return route
+        return route, body
 
     async def _post_openai_chat(
         self, request: web.Request, route: ShimModel, body: dict[str, Any], as_responses: bool
