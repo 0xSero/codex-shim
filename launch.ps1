@@ -330,6 +330,8 @@ function Show-Menu {
 
 # --- Main ---
 if (-not (Resolve-Keys)) { Write-Host ""; pause; exit 1 }
+Ensure-ShimRunning
+Patch-Catalog
 
 while ($true) {
     $models = Show-Menu
@@ -344,6 +346,7 @@ while ($true) {
         & $shimPath --settings $resolvedPath --port $port stop 2>&1 | Out-Null
         Start-Sleep 1
         Ensure-ShimRunning
+        Patch-Catalog
         Write-Host "  Shim restarted.`n" -ForegroundColor Green
         pause
         continue
