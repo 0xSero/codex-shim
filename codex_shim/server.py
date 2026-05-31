@@ -13,7 +13,10 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from .hostguard import build_allowed_hosts, host_guard_middleware
 from .settings import (
+    CHATGPT_LEGACY_ALIASES,
     CHATGPT_MODEL_SLUG,
+    CHATGPT_PASSTHROUGH_MODELS,
+    CHATGPT_PASSTHROUGH_SLUGS,
     DEFAULT_CODEX_AUTH,
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
@@ -67,13 +70,14 @@ class ShimServer:
         current = _current_managed_model()
         data: list[dict[str, Any]] = []
         if chatgpt_passthrough_available():
-            data.append(
+            data.extend(
                 {
-                    "slug": CHATGPT_MODEL_SLUG,
-                    "display_name": "GPT-5.5",
+                    "slug": model["slug"],
+                    "display_name": model["display_name"],
                     "provider": "chatgpt",
-                    "active": current == CHATGPT_MODEL_SLUG,
+                    "active": current == model["slug"],
                 }
+                for model in CHATGPT_PASSTHROUGH_MODELS
             )
         for m in self.settings.load():
             data.append(
@@ -98,8 +102,10 @@ class ShimServer:
         valid = {m.slug for m in models}
         display_for: dict[str, str] = {m.slug: m.display_name for m in models}
         if chatgpt_passthrough_available():
-            valid.add(CHATGPT_MODEL_SLUG)
-            display_for.setdefault(CHATGPT_MODEL_SLUG, "GPT-5.5")
+            valid.update(CHATGPT_PASSTHROUGH_SLUGS)
+            display_for.update(
+                {model["slug"]: model["display_name"] for model in CHATGPT_PASSTHROUGH_MODELS}
+            )
         if slug not in valid:
             return web.json_response({"error": f"unknown model: {slug}"}, status=404)
         _set_active_model(slug, display_for.get(slug, slug))
@@ -110,7 +116,8 @@ class ShimServer:
 
     async def health(self, _request: web.Request) -> web.Response:
         models = self.settings.load()
-        count = len(models) + (1 if chatgpt_passthrough_available() else 0)
+        passthrough_count = len(CHATGPT_PASSTHROUGH_MODELS) if chatgpt_passthrough_available() else 0
+        count = len(models) + passthrough_count
         return web.json_response(
             {
                 "ok": True,
@@ -123,8 +130,14 @@ class ShimServer:
         now = int(time.time())
         data: list[dict[str, Any]] = []
         if chatgpt_passthrough_available():
-            data.append({"id": CHATGPT_MODEL_SLUG, "object": "model", "created": now, "owned_by": "chatgpt"})
-        data.extend({"id": model.slug, "object": "model", "created": now, "owned_by": "codex-shim"} for model in self.settings.load())
+            data.extend(
+                {"id": model["slug"], "object": "model", "created": now, "owned_by": "chatgpt"}
+                for model in CHATGPT_PASSTHROUGH_MODELS
+            )
+        data.extend(
+            {"id": model.slug, "object": "model", "created": now, "owned_by": "codex-shim"}
+            for model in self.settings.load()
+        )
         return web.json_response({"object": "list", "data": data})
 
     async def chat_completions(self, request: web.Request) -> web.StreamResponse:
@@ -145,8 +158,14 @@ class ShimServer:
         body = await request.json()
         _log_incoming_request("/v1/responses", body)
         model = str(body.get("model") or "")
-        if model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5"):
-            return await self._chatgpt_passthrough(request, body)
+        passthrough_model = _chatgpt_passthrough_model(model)
+        if passthrough_model:
+            return await self._chatgpt_passthrough(
+                request,
+                body,
+                passthrough_model=passthrough_model,
+                response_model_override=model if passthrough_model != model else None,
+            )
         if self._needs_image_gen(body) or self._needs_image_followup(body):
             return await self._chatgpt_passthrough(request, body, response_model_override=model)
         route = self._route(body)
@@ -162,8 +181,9 @@ class ShimServer:
         body = await request.json()
         _log_incoming_request("/v1/responses/compact", body)
         model = str(body.get("model") or "")
-        if model == CHATGPT_MODEL_SLUG or model.startswith("openai-gpt-5-5"):
-            return await self._chatgpt_compact_passthrough(request, body)
+        passthrough_model = _chatgpt_passthrough_model(model)
+        if passthrough_model:
+            return await self._chatgpt_compact_passthrough(request, body, passthrough_model=passthrough_model)
         route = self._route(body)
         compact_body = _compact_request_body(body, route.model)
         if route.is_openai_chat:
@@ -336,11 +356,15 @@ class ShimServer:
         return str(content)
 
     async def _chatgpt_passthrough(
-        self, request: web.Request, body: dict[str, Any], response_model_override: str | None = None
+        self,
+        request: web.Request,
+        body: dict[str, Any],
+        passthrough_model: str = CHATGPT_MODEL_SLUG,
+        response_model_override: str | None = None,
     ) -> web.StreamResponse:
         """Forward a Responses request to chatgpt.com using the user's Codex auth.
 
-        Lets the picker expose OpenAI's real GPT-5.5 (ChatGPT subscription) as a
+        Lets the picker expose OpenAI's real Codex models (ChatGPT subscription) as
         first-class model alongside configured BYOK entries.
         """
         auth_path = DEFAULT_CODEX_AUTH.expanduser()
@@ -354,7 +378,7 @@ class ShimServer:
         if not access_token:
             raise web.HTTPUnauthorized(text="auth.json has no access_token")
         forwarded = _sanitize_chatgpt_passthrough_body(body)
-        forwarded["model"] = CHATGPT_MODEL_SLUG
+        forwarded["model"] = passthrough_model
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -401,7 +425,12 @@ class ShimServer:
                 pass
             return response
 
-    async def _chatgpt_compact_passthrough(self, request: web.Request, body: dict[str, Any]) -> web.StreamResponse:
+    async def _chatgpt_compact_passthrough(
+        self,
+        request: web.Request,
+        body: dict[str, Any],
+        passthrough_model: str = CHATGPT_MODEL_SLUG,
+    ) -> web.StreamResponse:
         auth_path = DEFAULT_CODEX_AUTH.expanduser()
         try:
             auth = json.loads(auth_path.read_text())
@@ -414,7 +443,7 @@ class ShimServer:
             raise web.HTTPUnauthorized(text="auth.json has no access_token")
         forwarded = _sanitize_chatgpt_passthrough_body(body)
         original_model = str(forwarded.get("model") or "")
-        forwarded["model"] = CHATGPT_MODEL_SLUG
+        forwarded["model"] = passthrough_model
         forwarded.pop("stream", None)
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -578,6 +607,14 @@ def _sanitize_chatgpt_passthrough_value(value: Any) -> Any:
 def _has_shim_encrypted_content(value: dict[str, Any]) -> bool:
     encrypted_content = value.get("encrypted_content")
     return isinstance(encrypted_content, str) and encrypted_content.startswith(SHIM_ENCRYPTED_CONTENT_PREFIX)
+
+
+def _chatgpt_passthrough_model(model: str) -> str | None:
+    if model in CHATGPT_PASSTHROUGH_SLUGS:
+        return model
+    if model.startswith("openai-gpt-5-5"):
+        return CHATGPT_MODEL_SLUG
+    return CHATGPT_LEGACY_ALIASES.get(model)
 
 
 def _rewrite_response_model(payload: Any, model: str | None) -> None:

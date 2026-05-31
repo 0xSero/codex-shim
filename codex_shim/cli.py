@@ -16,7 +16,10 @@ from urllib.request import urlopen
 
 from .catalog import _toml_escape, codex_config_overrides, write_catalog, write_config
 from .settings import (
+    CHATGPT_LEGACY_ALIASES,
     CHATGPT_MODEL_SLUG,
+    CHATGPT_PASSTHROUGH_MODELS,
+    CHATGPT_PASSTHROUGH_SLUGS,
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -184,12 +187,15 @@ def list_models(settings_path: Path) -> int:
     models = _load_models(settings_path)
     rows: list[tuple[str, str, str, str]] = []
     if chatgpt_passthrough_available():
-        rows.append(("gpt-5.5", "GPT-5.5", "gpt-5.5", "chatgpt"))
+        rows.extend(
+            (model["slug"], model["display_name"], model["slug"], "chatgpt")
+            for model in CHATGPT_PASSTHROUGH_MODELS
+        )
     rows.extend((model.slug, model.display_name, model.model, model.provider) for model in models)
     if not rows:
         print(
             "No models available. Create ~/.codex-shim/models.json, pass --settings /path/to/models.json, "
-            "or run `codex login` so ~/.codex/auth.json grants the gpt-5.5 passthrough.",
+            "or run `codex login` so ~/.codex/auth.json grants ChatGPT passthrough models.",
             file=sys.stderr,
         )
         return 1
@@ -696,13 +702,14 @@ def _resolve_model_slug(models, requested: str | None) -> str:
             return default_model_slug(models)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-    if requested in {CHATGPT_MODEL_SLUG, "openai-gpt-5-5"}:
+    legacy_alias = CHATGPT_LEGACY_ALIASES.get(requested)
+    if legacy_alias or requested in CHATGPT_PASSTHROUGH_SLUGS:
         if not chatgpt_passthrough_available():
             raise SystemExit(
-                "gpt-5.5 passthrough requires a Codex login. "
+                f"{requested} passthrough requires a Codex login. "
                 "Run `codex login` so ~/.codex/auth.json contains tokens.access_token."
             )
-        return CHATGPT_MODEL_SLUG
+        return legacy_alias or requested
     by_slug = {model.slug: model.slug for model in models}
     by_model = {}
     for model in models:
@@ -739,7 +746,7 @@ def _current_managed_model() -> str | None:
 def _valid_model_slugs(models) -> set[str]:
     slugs = {model.slug for model in models}
     if chatgpt_passthrough_available():
-        slugs.add(CHATGPT_MODEL_SLUG)
+        slugs.update(CHATGPT_PASSTHROUGH_SLUGS)
     return slugs
 
 

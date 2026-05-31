@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .settings import CHATGPT_MODEL_SLUG, PROVIDER_NAME, ShimModel, chatgpt_passthrough_available, default_model_slug
+from .settings import (
+    CHATGPT_MODEL_SLUG,
+    CHATGPT_PASSTHROUGH_MODELS,
+    PROVIDER_NAME,
+    ShimModel,
+    chatgpt_passthrough_available,
+    default_model_slug,
+)
 
 
 PLAN_TIERS = ["free", "plus", "pro", "team", "business", "enterprise"]
@@ -61,12 +68,12 @@ def catalog_entry(model: ShimModel) -> dict:
     }
 
 
-def chatgpt_passthrough_entry() -> dict:
-    """Catalog entry for the original GPT-5.5 routed through ChatGPT passthrough."""
+def chatgpt_passthrough_entry(slug: str, display_name: str, priority: int) -> dict:
+    """Catalog entry for a first-party Codex model routed through ChatGPT passthrough."""
     return {
-        "slug": CHATGPT_MODEL_SLUG,
-        "display_name": "GPT-5.5",
-        "description": "OpenAI GPT-5.5 — the default Codex model, routed through ChatGPT passthrough.",
+        "slug": slug,
+        "display_name": display_name,
+        "description": f"OpenAI {display_name} — routed through ChatGPT passthrough.",
         "context_window": 400000,
         "max_context_window": 400000,
         "auto_compact_token_limit": 320000,
@@ -97,14 +104,14 @@ def chatgpt_passthrough_entry() -> dict:
         "supported_in_api": True,
         "availability_nux": None,
         "upgrade": None,
-        "isDefault": True,
-        "priority": 10000,
+        "isDefault": slug == CHATGPT_MODEL_SLUG,
+        "priority": priority,
         "prefer_websockets": False,
         "available_in_plans": PLAN_TIERS,
-        "base_instructions": "You are Codex, a coding agent powered by GPT-5.5.",
+        "base_instructions": f"You are Codex, a coding agent powered by {display_name}.",
         "model_messages": {
-            "instructions_template": "You are Codex, a coding agent powered by GPT-5.5.",
-            "instructions_variables": {"model_name": "GPT-5.5"},
+            "instructions_template": f"You are Codex, a coding agent powered by {display_name}.",
+            "instructions_variables": {"model_name": display_name},
         },
     }
 
@@ -113,7 +120,10 @@ def write_catalog(models: list[ShimModel], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     entries: list[dict] = []
     if chatgpt_passthrough_available():
-        entries.append(chatgpt_passthrough_entry())
+        entries.extend(
+            chatgpt_passthrough_entry(model["slug"], model["display_name"], 10000 - index)
+            for index, model in enumerate(CHATGPT_PASSTHROUGH_MODELS)
+        )
     entries.extend(catalog_entry(model) for model in models)
     payload = {"models": entries}
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
@@ -185,4 +195,3 @@ def _reasoning_effort(model: ShimModel) -> str:
 
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-

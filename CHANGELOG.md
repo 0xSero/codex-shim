@@ -46,6 +46,8 @@ and this project does not yet follow semantic versioning (pre-1.0).
   `.codex-shim/last_request.json` to make strict-provider tokenization /
   schema errors easier to triage. Upstream error bodies are now logged with
   the model slug before being forwarded back.
+- ChatGPT/Codex passthrough now advertises `gpt-5.5`, `gpt-5.4`, and
+  `gpt-5.4-mini` when `~/.codex/auth.json` has a usable access token.
 
 ### Changed
 

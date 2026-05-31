@@ -110,19 +110,25 @@ def test_cli_load_models_missing_custom_settings_has_actionable_error(tmp_path):
 
 def test_cli_resolves_chatgpt_passthrough_slug_when_auth_present(auth_present):
     assert cli._resolve_model_slug([], "gpt-5.5") == "gpt-5.5"
+    assert cli._resolve_model_slug([], "gpt-5.4") == "gpt-5.4"
+    assert cli._resolve_model_slug([], "gpt-5.4-mini") == "gpt-5.4-mini"
     assert cli._resolve_model_slug([], "openai-gpt-5-5") == "gpt-5.5"
 
 
 def test_cli_rejects_chatgpt_passthrough_slug_when_auth_missing(auth_missing):
-    with pytest.raises(SystemExit) as exc:
-        cli._resolve_model_slug([], "gpt-5.5")
-    assert "codex login" in str(exc.value)
+    for slug in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini"):
+        with pytest.raises(SystemExit) as exc:
+            cli._resolve_model_slug([], slug)
+        assert "codex login" in str(exc.value)
 
 
 def test_list_models_includes_chatgpt_passthrough_when_auth_present(monkeypatch, capsys, auth_present):
     monkeypatch.setattr(cli, "_load_models", lambda _settings_path: [])
     assert cli.list_models("unused") == 0
-    assert "gpt-5.5" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "gpt-5.5" in out
+    assert "gpt-5.4" in out
+    assert "gpt-5.4-mini" in out
 
 
 def test_list_models_hides_chatgpt_passthrough_when_auth_missing(monkeypatch, capsys, auth_missing):
@@ -130,6 +136,8 @@ def test_list_models_hides_chatgpt_passthrough_when_auth_missing(monkeypatch, ca
     assert cli.list_models("unused") == 1
     out = capsys.readouterr()
     assert "gpt-5.5" not in out.out
+    assert "gpt-5.4" not in out.out
+    assert "gpt-5.4-mini" not in out.out
     assert "codex login" in out.err
 
 
@@ -166,7 +174,7 @@ def test_write_catalog_includes_gpt55_when_auth_present(tmp_path, auth_present):
     catalog_path = tmp_path / "catalog.json"
     write_catalog([], catalog_path)
     data = json.loads(catalog_path.read_text())
-    assert [model["slug"] for model in data["models"]] == ["gpt-5.5"]
+    assert [model["slug"] for model in data["models"]] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
 
 
 def test_managed_config_escapes_windows_catalog_path(monkeypatch):

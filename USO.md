@@ -20,7 +20,7 @@ diferentes proveedores de modelo:
 │  (chatgpt.com)                      │                           │
 │       │                           ▼ (Anthropic Messages)         │
 │       ▼                          DeepSeek API                    │
-│  GPT-5.5                        (api.deepseek.com/anthropic)     │
+│  GPT-5.5 / GPT-5.4 / Mini       (api.deepseek.com/anthropic)     │
 │                                                                  │
 │  ─── ó ───                                                      │
 │                                                                  │
@@ -37,7 +37,8 @@ diferentes proveedores de modelo:
 
 ### Modo Normal
 
-- Usa **GPT-5.5** a través de ChatGPT (créditos de suscripción)
+- Usa **GPT-5.5**, **GPT-5.4** o **GPT-5.4 Mini** a través de ChatGPT
+  (créditos de suscripción)
 - **No requiere servidores locales**
 - Codex conecta directamente a `chatgpt.com`
 - Apropiado para uso diario cuando hay créditos disponibles
@@ -130,7 +131,7 @@ Los siguientes objetivos están disponibles en el `Makefile` de Moon Bridge:
 ```bash
 cd ~/Documents/gitprojects/moon-bridge
 
-make mode-normal       # Cambia a GPT-5.5 (ChatGPT)
+make mode-normal       # Cambia al modo ChatGPT
 make mode-deepseek     # Cambia a DeepSeek V4 Flash (vía codex-shim)
 make mode-deepseek-pro # Cambia a DeepSeek V4 Pro (vía codex-shim)
 make mode-moonbridge   # Cambia a Moon Bridge directo (para Codex CLI)
@@ -142,8 +143,8 @@ make mode-moonbridge   # Cambia a Moon Bridge directo (para Codex CLI)
 # Ver modelos disponibles
 codex-shim list
 
-# Cambiar a GPT-5.5 (ChatGPT — modo normal)
-codex-shim model use gpt-5.5
+# Cambiar a un modelo ChatGPT/Codex first-party
+codex-shim model use gpt-5.4-mini
 
 # Cambiar a DeepSeek V4 Flash (BYOK)
 codex-shim model use deepseek-v4-flash
@@ -174,6 +175,11 @@ Verás una interfaz como esta:
 │  └─────────────────────────────────────┘    │
 │                                             │
 │  ┌─────────────────────────────────────┐    │
+│  │ GPT-5.4 Mini              🔄Switch │    │
+│  │ chatgpt · gpt-5.4-mini             │    │
+│  └─────────────────────────────────────┘    │
+│                                             │
+│  ┌─────────────────────────────────────┐    │
 │  │ DeepSeek V4 Pro           🔄Switch │    │
 │  │ anthropic · deepseek-v4-pro        │    │
 │  └─────────────────────────────────────┘    │
@@ -191,9 +197,9 @@ Verás una interfaz como esta:
 **Cómo funciona:**
 
 Cada tarjeta muestra:
-- **Nombre del modelo** (GPT-5.5, DeepSeek V4 Pro, DeepSeek V4 Flash)
+- **Nombre del modelo** (GPT-5.5, GPT-5.4 Mini, DeepSeek V4 Pro, etc.)
 - **Proveedor** (`chatgpt` o `anthropic`)
-- **Slug** interno (`gpt-5.5`, `deepseek-v4-pro`, etc.)
+- **Slug** interno (`gpt-5.5`, `gpt-5.4-mini`, `deepseek-v4-pro`, etc.)
 - **Estado**: 🟢 Active (modelo actual) o 🔄 Switch (cambiar a este)
 
 **Para cambiar:**
@@ -300,18 +306,18 @@ make codex-config
 
 ## Flujo de Datos Detallado
 
-### Modo Normal (ChatGPT — GPT-5.5)
+### Modo Normal (ChatGPT — modelos first-party)
 
 ```
 Usuario → Codex App/CLI
-  → POST /v1/responses {model: "gpt-5.5", ...}
+  → POST /v1/responses {model: "gpt-5.4-mini", ...}
   → Si está usando codex-shim:
-      → codex-shim detecta modelo "gpt-5.5"
+      → codex-shim detecta un modelo passthrough de ChatGPT/Codex
       → Reenvía a chatgpt.com/backend-api/codex/responses con token de auth
       → ChatGPT devuelve respuesta nativa OpenAI Responses
       → codex-shim devuelve respuesta a Codex sin traducción
   → Si está usando Moon Bridge:
-      → Moon Bridge no tiene GPT-5.5; no aplica
+      → Moon Bridge no tiene modelos ChatGPT/Codex first-party; no aplica
 ```
 
 ### Modo DeepSeek (BYOK — vía codex-shim)
@@ -369,7 +375,7 @@ Usuario → Codex CLI
 
 ## Resolución de Problemas
 
-### "El selector solo muestra GPT-5.5"
+### "El selector solo muestra modelos ChatGPT"
 
 ```bash
 # Asegúrate de haber ejecutado el parche (una sola vez):
@@ -447,7 +453,7 @@ make test            # Ejecutar tests
 make run             # Iniciar Moon Bridge
 make stop            # Detener Moon Bridge
 make codex-config    # Generar config para Codex CLI
-make mode-normal     # Cambiar a GPT-5.5 (ChatGPT)
+make mode-normal     # Cambiar a ChatGPT/Codex
 make mode-deepseek   # Cambiar a DeepSeek V4 Flash (codex-shim)
 make mode-deepseek-pro # Cambiar a DeepSeek V4 Pro (codex-shim)
 make mode-moonbridge # Cambiar a Moon Bridge directo

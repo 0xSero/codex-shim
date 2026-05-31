@@ -14,6 +14,13 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 PROVIDER_NAME = "codex_shim"
 CHATGPT_MODEL_SLUG = "gpt-5.5"
+CHATGPT_PASSTHROUGH_MODELS = [
+    {"slug": "gpt-5.5", "display_name": "GPT-5.5"},
+    {"slug": "gpt-5.4", "display_name": "GPT-5.4"},
+    {"slug": "gpt-5.4-mini", "display_name": "GPT-5.4 Mini"},
+]
+CHATGPT_PASSTHROUGH_SLUGS = {model["slug"] for model in CHATGPT_PASSTHROUGH_MODELS}
+CHATGPT_LEGACY_ALIASES = {"openai-gpt-5-5": CHATGPT_MODEL_SLUG}
 
 
 def chatgpt_passthrough_available(auth_path: Path | None = None) -> bool:

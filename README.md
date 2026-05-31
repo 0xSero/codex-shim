@@ -34,7 +34,8 @@ local:
   SSE are translated instead of flattened into plain text.
 - **ChatGPT/Codex passthrough.** If `~/.codex/auth.json` has a valid Codex
   access token, the shim can route Codex's native `/v1/responses` traffic to
-  ChatGPT's Codex backend under the `gpt-5.5` slug used by current Codex builds.
+  ChatGPT's Codex backend under first-party slugs such as `gpt-5.5`,
+  `gpt-5.4`, and `gpt-5.4-mini`.
 - **Prompt-catching/proxy-friendly architecture.** Put a local proxy in front
   of the shim to dedupe boilerplate, inject stable instructions, repair
   pseudo-tool text, or route prompts by policy before they hit an upstream.
@@ -246,8 +247,9 @@ codex-shim disable
 ```
 
 After this, Codex Desktop sees every entry from `~/.codex-shim/models.json`,
-plus the `GPT-5.5` ChatGPT passthrough slug if (and only if) `~/.codex/auth.json`
-holds a valid `tokens.access_token`.
+plus the ChatGPT/Codex passthrough slugs `gpt-5.5`, `gpt-5.4`, and
+`gpt-5.4-mini` if (and only if) `~/.codex/auth.json` holds a valid
+`tokens.access_token`.
 
 If your Codex Desktop's model picker only shows `default` and refuses to render
 the catalog entries, apply the macOS picker patch below.
@@ -256,7 +258,7 @@ the catalog entries, apply the macOS picker patch below.
 
 ```bash
 codex-model list
-codex-model gpt-5.5          # or any other slug from `list`
+codex-model gpt-5.4-mini     # or any other slug from `list`
 codex-app                   # relaunch Codex with new default
 ```
 
@@ -278,8 +280,8 @@ codex-shim codex -- "inspect this repo and summarize the architecture"
 ## Custom config file
 
 The shim defaults to `~/.codex-shim/models.json`. If that file is missing, the
-shim still generates a catalog — and adds the `gpt-5.5` ChatGPT passthrough
-entry only when `~/.codex/auth.json` contains a valid `tokens.access_token`.
+shim still generates a catalog — and adds the ChatGPT/Codex passthrough entries
+only when `~/.codex/auth.json` contains a valid `tokens.access_token`.
 You can point it at any compatible file:
 
 ```bash
@@ -486,29 +488,31 @@ and re-check the manual patch needles against the installed Desktop build.
 ## ChatGPT/Codex passthrough
 
 If `~/.codex/auth.json` exists and contains `tokens.access_token`, the shim
-exposes a synthetic `gpt-5.5` catalog entry that proxies straight to:
+exposes synthetic `gpt-5.5`, `gpt-5.4`, and `gpt-5.4-mini` catalog entries that
+proxy straight to:
 
 ```text
 https://chatgpt.com/backend-api/codex/responses
 ```
 
-The entry is **only** advertised in `/health`, `/v1/models`, `codex-shim list`,
-and the generated `custom_model_catalog.json` while that token is present. Once
-you `codex logout` or the file is missing, the slug stops appearing — so the
-picker never shows an option that would 401 on first use. Run `codex login` to
-mint a new token and the entry comes back automatically on the next
+These entries are **only** advertised in `/health`, `/v1/models`,
+`codex-shim list`, and the generated `custom_model_catalog.json` while that
+token is present. Once you `codex logout` or the file is missing, the slugs stop
+appearing — so the picker never shows an option that would 401 on first use. Run
+`codex login` to mint a new token and the entries come back automatically on the next
 `codex-shim generate`.
 
-The passthrough keeps Codex's native `/v1/responses` payload intact, changes the
-model to `gpt-5.5`, and sends your Codex access token as `Authorization: Bearer
-<access_token>` with the ChatGPT account id from `auth.json` when present. It
-bypasses configured BYOK routes entirely and uses your ChatGPT subscription quota.
+The passthrough keeps Codex's native `/v1/responses` payload intact, forwards the
+selected first-party model slug, and sends your Codex access token as
+`Authorization: Bearer <access_token>` with the ChatGPT account id from
+`auth.json` when present. It bypasses configured BYOK routes entirely and uses
+your ChatGPT subscription quota.
 
 It is already in `.codex-shim/custom_model_catalog.json` after `codex-shim
-generate`. Select `GPT-5.5` in the picker, or run:
+generate`. Select a ChatGPT model in the picker, or run:
 
 ```bash
-codex-model gpt-5.5
+codex-model gpt-5.4-mini
 ```
 
 Older local configs or notes may refer to `openai-gpt-5-5`; the server accepts
@@ -521,7 +525,7 @@ that prefix as an alias and routes it to the same passthrough.
 ```text
 Codex Desktop ── /v1/responses ──▶ codex-shim (127.0.0.1:8765)
                                      │
-                                     ├── slug "gpt-5.5"
+                                     ├── slug "gpt-5.5" / "gpt-5.4" / "gpt-5.4-mini"
                                      │       └─▶ chatgpt.com/backend-api/codex/responses
                                      │           (Authorization: Bearer <auth.json access_token>)
                                      │
@@ -596,7 +600,7 @@ Codex can compact long sessions through `POST /v1/responses/compact`.
 
 | route | behavior |
 |---|---|
-| ChatGPT passthrough (`gpt-5.5` / `openai-gpt-5-5*`) | Forwards to ChatGPT's native `/backend-api/codex/responses/compact` endpoint and rewrites returned model metadata back to the requested shim slug. |
+| ChatGPT passthrough (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `openai-gpt-5-5*`) | Forwards to ChatGPT's native `/backend-api/codex/responses/compact` endpoint and rewrites returned model metadata back to the requested shim slug when using a legacy alias. |
 | BYOK OpenAI/chat-completions providers | Sends a non-streaming summarization request through `/chat/completions`, then returns a Responses-shaped compacted window whose `output` can be used as the next `input`. |
 | BYOK Anthropic providers | Sends a non-streaming compact request through `/messages`, then returns the same Responses-shaped compacted window. |
 
@@ -719,7 +723,7 @@ Suggested quick protocol:
 
 1. Pick one real task that uses tools, e.g. "find the bug, edit the file, run
    the focused test".
-2. Run it once through your baseline Codex route and once through `gpt-5.5`
+2. Run it once through your baseline Codex route and once through a ChatGPT
    passthrough or your BYOK model.
 3. Record wall time, request count, prompt tokens, output tokens, tool-call
    count, and final test result.
@@ -859,8 +863,9 @@ codex-shim --port 8766 app .
 
 That is fine for ChatGPT passthrough-only use, **provided** `~/.codex/auth.json`
 has a valid `tokens.access_token`. In that case `codex-shim generate` writes a
-catalog containing just `gpt-5.5`. If neither file is present, the catalog will
-be empty and `codex-shim list` will exit non-zero with a hint to run
+catalog containing just the ChatGPT/Codex passthrough models. If neither file is
+present, the catalog will be empty and `codex-shim list` will exit non-zero with
+a hint to run
 `codex login` or pass a compatible settings file:
 
 ```bash

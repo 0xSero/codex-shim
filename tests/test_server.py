@@ -178,6 +178,44 @@ async def test_image_generation_routes_to_chatgpt_passthrough_and_rewrites_model
     await shim_client.close()
 
 
+async def test_responses_chatgpt_passthrough_preserves_requested_first_party_model(
+    monkeypatch, tmp_path, auth_present
+):
+    captured = {}
+
+    class FakeUpstream:
+        status = 200
+        content_type = "application/json"
+
+        async def json(self, content_type=None):
+            return {"id": "resp_passthrough", "model": "gpt-5.4-mini", "output": []}
+
+        def release(self):
+            pass
+
+    async def fake_post(self, url, json=None, headers=None):
+        captured["url"] = url
+        captured["body"] = json
+        captured["headers"] = headers
+        return FakeUpstream()
+
+    monkeypatch.setattr("codex_shim.server.ClientSession.post", fake_post)
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"customModels": []}))
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+
+    resp = await shim_client.post("/v1/responses", json={"model": "gpt-5.4-mini", "input": "hi"})
+    assert resp.status == 200
+    payload = await resp.json()
+    assert payload["model"] == "gpt-5.4-mini"
+    assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert captured["body"]["model"] == "gpt-5.4-mini"
+    assert captured["headers"]["Authorization"] == "Bearer stub"
+
+    await shim_client.close()
+
+
 async def test_responses_routes_to_openai_chat(tmp_path):
     captured = {}
 
@@ -447,13 +485,13 @@ async def test_health_and_models_include_chatgpt_passthrough_when_auth_present(t
     health = await shim_client.get("/health")
     assert health.status == 200
     body = await health.json()
-    assert body["models"] == 1
+    assert body["models"] == 3
     assert body["chatgpt_passthrough"] is True
 
     models = await shim_client.get("/v1/models")
     assert models.status == 200
     payload = await models.json()
-    assert [model["id"] for model in payload["data"]] == ["gpt-5.5"]
+    assert [model["id"] for model in payload["data"]] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
 
     await shim_client.close()
 
@@ -676,7 +714,7 @@ async def test_api_models_includes_chatgpt_when_auth_present(
         resp = await shim_client.get("/api/models")
         data = await resp.json()
         slugs = [m["slug"] for m in data]
-        assert slugs[0] == "gpt-5.5"
+        assert slugs[:3] == ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
         assert data[0]["active"] is True
     finally:
         await shim_client.close()
