@@ -32,6 +32,20 @@ function Get-ZaiQuota {
     } catch { return $null }
 }
 
+function Get-CodexQuota {
+    $authPath = Join-Path $HOME ".codex" "auth.json"
+    if (-not (Test-Path $authPath)) { return $null }
+    try {
+        $auth = Get-Content $authPath -Raw | ConvertFrom-Json
+        $token = $auth.tokens.access_token
+        $acctId = $auth.tokens.account_id
+        if (-not $token -or -not $acctId) { return $null }
+        $resp = curl.exe -s -H "Authorization: Bearer $token" -H "Accept: application/json" -H "ChatGPT-Account-Id: $acctId" -H "Origin: https://chatgpt.com" -H "Referer: https://chatgpt.com/" -H "User-Agent: Mozilla/5.0" "https://chatgpt.com/backend-api/wham/usage" 2>$null
+        $data = $resp | ConvertFrom-Json
+        if ($data.rate_limit) { return $data } else { return $null }
+    } catch { return $null }
+}
+
 function Format-ResetTime($ts) {
     $dt = [DateTimeOffset]::FromUnixTimeMilliseconds($ts).DateTime
     $diff = $dt - (Get-Date)
@@ -79,6 +93,25 @@ function Resolve-Keys {
     $raw = $raw -replace '"display_name": "Z\.AI GLM 5\.1"', "`"display_name`": `"Z.AI Pro | GLM 5.1$zaiTag`""
     $raw = $raw -replace '"display_name": "Z\.AI GLM 5"', "`"display_name`": `"Z.AI Pro | GLM 5$zaiTag`""
 
+    # Inject live Codex/ChatGPT quota into GPT-5.5 display name
+    $codexQ = Get-CodexQuota
+    $codexTag = ""
+    if ($codexQ) {
+        $plan = $codexQ.plan_type.ToUpper()
+        $pri = $codexQ.rate_limit.primary_window
+        $sec = $codexQ.rate_limit.secondary_window
+        $priUsed = $pri.used_percent
+        $secUsed = $sec.used_percent
+        $priReset = ""
+        if ($pri.reset_after_seconds) {
+            $h = [math]::Floor($pri.reset_after_seconds / 3600)
+            $m = [math]::Floor(($pri.reset_after_seconds % 3600) / 60)
+            $priReset = " ${h}h${m}m"
+        }
+        $codexTag = " ($plan | 5h:${priUsed}%${priReset} wk:${secUsed}%)"
+    }
+    $raw = $raw -replace '"display_name": "GPT-5\.5"', "`"display_name`": `"GPT-5.5$codexTag`""
+
     # Inject cost info into Go display names
     foreach ($entry in $costInfo.GetEnumerator()) {
         $model = $entry.Key
@@ -103,6 +136,31 @@ function Resolve-Keys {
 
     [System.IO.File]::WriteAllText($resolvedPath, $raw, (New-Object System.Text.UTF8Encoding $false))
     return $true
+}
+
+function Patch-Catalog {
+    $catalogPath = "C:\Users\sergi\codex-shim\.codex-shim\custom_model_catalog.json"
+    if (-not (Test-Path $catalogPath)) { return }
+
+    $codexQ = Get-CodexQuota
+    if (-not $codexQ) { return }
+
+    $plan = $codexQ.plan_type.ToUpper()
+    $pri = $codexQ.rate_limit.primary_window
+    $sec = $codexQ.rate_limit.secondary_window
+    $priUsed = $pri.used_percent
+    $secUsed = $sec.used_percent
+    $priReset = ""
+    if ($pri.reset_after_seconds) {
+        $h = [math]::Floor($pri.reset_after_seconds / 3600)
+        $m = [math]::Floor(($pri.reset_after_seconds % 3600) / 60)
+        $priReset = " ${h}h${m}m"
+    }
+    $newName = "GPT-5.5 ($plan | 5h:${priUsed}%${priReset} wk:${secUsed}%)"
+
+    $raw = [System.IO.File]::ReadAllText($catalogPath)
+    $raw = $raw.Replace('"display_name": "GPT-5.5"', "`"display_name`": `"$newName`"")
+    [System.IO.File]::WriteAllText($catalogPath, $raw, (New-Object System.Text.UTF8Encoding $false))
 }
 
 function Ensure-ShimRunning {
@@ -168,6 +226,40 @@ function Show-Menu {
                 Write-Host " ${pct}% used  resets in $reset" -ForegroundColor DarkGray
             }
         }
+        Write-Host ""
+    }
+
+    # --- Codex/ChatGPT Live Quota ---
+    $codexQ = Get-CodexQuota
+    if ($codexQ) {
+        $plan = $codexQ.plan_type.ToUpper()
+        $pri = $codexQ.rate_limit.primary_window
+        $sec = $codexQ.rate_limit.secondary_window
+        $limitReached = $codexQ.rate_limit.limit_reached
+        Write-Host "  CODEX / CHATGPT ($plan)" -ForegroundColor DarkYellow
+        if ($limitReached) {
+            Write-Host "    STATUS: " -NoNewline; Write-Host "LIMIT REACHED" -ForegroundColor Red
+        }
+        $pb5h = Format-PercentBar $pri.used_percent
+        $reset5h = ""
+        if ($pri.reset_after_seconds) {
+            $h = [math]::Floor($pri.reset_after_seconds / 3600)
+            $m = [math]::Floor(($pri.reset_after_seconds % 3600) / 60)
+            $reset5h = "  resets in ${h}h ${m}m"
+        }
+        Write-Host "    5h Window:   " -NoNewline
+        Write-Host "[$($pb5h.bar)]" -NoNewline -ForegroundColor $pb5h.color
+        Write-Host " $($pri.used_percent)% used$reset5h" -ForegroundColor DarkGray
+        $pbWk = Format-PercentBar $sec.used_percent
+        $resetWk = ""
+        if ($sec.reset_after_seconds) {
+            $d = [math]::Floor($sec.reset_after_seconds / 86400)
+            $h = [math]::Floor(($sec.reset_after_seconds % 86400) / 3600)
+            $resetWk = "  resets in ${d}d ${h}h"
+        }
+        Write-Host "    Weekly:      " -NoNewline
+        Write-Host "[$($pbWk.bar)]" -NoNewline -ForegroundColor $pbWk.color
+        Write-Host " $($sec.used_percent)% used$resetWk" -ForegroundColor DarkGray
         Write-Host ""
     }
 
@@ -261,6 +353,7 @@ while ($true) {
     if ([int]::TryParse($choice, [ref]$idx) -and $idx -ge 1 -and $idx -le $models.Count) {
         $picked = $models[$idx - 1]
         Ensure-ShimRunning
+        Patch-Catalog
         Write-Host "`n  Switching to $($picked.Name)..." -ForegroundColor Yellow
         & $shimPath --settings $resolvedPath --port $port model use $picked.Slug 2>&1 | ForEach-Object { Write-Host "  $_" }
 
