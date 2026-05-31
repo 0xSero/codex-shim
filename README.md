@@ -221,7 +221,7 @@ Generated runtime files live under the repo-local `.codex-shim/` directory:
 
 ```text
 .codex-shim/custom_model_catalog.json   # model picker catalog for Codex
-.codex-shim/config.toml                  # opt-in Codex provider config
+.codex-shim/config.toml                  # generated opt-in Codex provider config, separate from ~/.codex/config.toml
 .codex-shim/shim.pid                     # daemon pid
 .codex-shim/shim.log                     # stdout/stderr + request summaries
 ```
@@ -237,8 +237,9 @@ codex-shim app .             # launch Codex Desktop with the shim wired in
 
 `app` generates the catalog, starts the local daemon if needed, and writes a
 small managed block into `~/.codex/config.toml` so Codex Desktop uses the local
-provider. The previous config is backed up under `.codex-shim/` and the managed
-block can be removed with:
+provider. The generated `.codex-shim/config.toml` stays separate and is what
+the shim uses for its own opt-in config. The previous config is backed up under
+`.codex-shim/` and the managed block can be removed with:
 
 ```bash
 codex-shim disable
@@ -260,7 +261,8 @@ codex-app                   # relaunch Codex with new default
 ```
 
 `codex-model <slug>` is a shortcut for `codex-shim model use <slug>`. It writes
-only the shim-managed block in `~/.codex/config.toml`.
+only the shim-managed block in `~/.codex/config.toml` and leaves
+`.codex-shim/config.toml` untouched.
 
 ### 4. Use the Codex CLI without writing config
 
@@ -284,6 +286,10 @@ You can point it at any compatible file:
 codex-shim --settings /path/to/my-models.json generate
 codex-shim --settings /path/to/my-models.json start
 ```
+
+That settings file is the source for the generated `.codex-shim/config.toml`;
+Codex Desktop itself still reads `~/.codex/config.toml` when the managed block
+is installed.
 
 Recommended schema:
 
