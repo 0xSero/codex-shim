@@ -59,6 +59,11 @@ and this project does not yet follow semantic versioning (pre-1.0).
 
 ### Fixed
 
+- Anthropic route requests now send only `x-api-key` (plus `anthropic-version`)
+  for authentication and no longer also attach `Authorization: Bearer <apiKey>`.
+  Some Anthropic-compatible gateways reject requests that carry both headers.
+  Providers that genuinely require a bearer token can still supply one via
+  `extraHeaders`.
 - `codex-shim patch-app` now also patches the Codex Desktop sidebar's recent
   thread loader so native `openai` chats remain visible while Desktop is routed
   through the `codex_shim` provider. Tested on Codex Desktop 26.519.41501 /
