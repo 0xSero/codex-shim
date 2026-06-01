@@ -555,6 +555,7 @@ async def test_chat_routes_to_anthropic(tmp_path):
     assert payload["choices"][0]["message"]["content"] == "anthropic hello"
     assert captured["body"]["model"] == "claude-real"
     assert captured["headers"]["x-api-key"] == "secret"
+    assert "Authorization" not in captured["headers"]
 
     await shim_client.close()
     await upstream_client.close()

@@ -1129,7 +1129,6 @@ def _anthropic_headers(route: ShimModel) -> dict[str, str]:
     }
     if route.api_key:
         headers.setdefault("x-api-key", route.api_key)
-        headers.setdefault("Authorization", f"Bearer {route.api_key}")
     return headers
 
 
