@@ -312,6 +312,7 @@ async def iter_cursor_agent_events(prompt: str, model: str) -> AsyncIterator[dic
 
     stderr_task = asyncio.create_task(_drain_stderr())
     parser = CursorStreamParser()
+    stdout_complete = False
     try:
         if proc.stdin is not None:
             proc.stdin.write(prompt.encode("utf-8"))
@@ -333,11 +334,11 @@ async def iter_cursor_agent_events(prompt: str, model: str) -> AsyncIterator[dic
             delta = parser.feed_line(buffer)
             if delta:
                 yield {"type": "text_delta", "delta": delta}
+        stdout_complete = True
     finally:
-        if proc.returncode is None:
+        if not stdout_complete and proc.returncode is None:
             proc.kill()
         await proc.wait()
-        stderr_task.cancel()
         try:
             await stderr_task
         except asyncio.CancelledError:

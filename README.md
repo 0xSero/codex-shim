@@ -523,15 +523,15 @@ If `cursor-agent status` shows you are logged in, the shim exposes
 
 ```bash
 cursor-agent login
-- `scripts/codex-shim-install-cursor-composer` — optional helper to wire Composer via subscription
+scripts/codex-shim-install-cursor-composer
 codex-shim model use composer-2-5
 codex-app
 ```
 
-Full architecture, Open Design cross-references, troubleshooting, and a
-GitHub Pages publishing template:
-
-→ **[docs/subscription-integration.md](docs/subscription-integration.md)**
+The install helper is optional; it regenerates the local catalog/config and
+sets `composer-2-5` as the active model when `cursor-agent status` reports an
+active login. Troubleshoot with `cursor-agent status` and `/health`, which
+reports `cursor_passthrough: true` when the shim can expose Composer.
 
 Do **not** configure Composer via `cursor-api.standardagents.ai` unless you
 intentionally want Dashboard API-key billing (`crsr_…`). That path is BYOK,
