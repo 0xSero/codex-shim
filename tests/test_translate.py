@@ -68,7 +68,7 @@ def test_anthropic_messages_to_chat_preserves_tools_images_and_tool_results():
         {"role": "system", "content": "System"},
         {
             "role": "assistant",
-            "content": None,
+            "content": "",
             "tool_calls": [
                 {"id": "toolu_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"repo\"}"}}
             ],
@@ -119,6 +119,56 @@ def test_chat_completion_to_anthropic_message_preserves_text_tools_and_usage():
         {"type": "tool_use", "id": "call_2", "name": "broken", "input": {"_raw": "{"}},
     ]
 
+
+
+def test_chat_completion_to_anthropic_message_tool_only_uses_empty_content():
+    payload = {
+        "id": "chatcmpl_tool_only",
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"repo\"}"}},
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+    out = chat_completion_to_anthropic_message(payload, "shim-model")
+
+    assert out["content"] == [
+        {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"q": "repo"}},
+    ]
+    assert out["stop_reason"] == "tool_use"
+
+
+def test_chat_completion_to_anthropic_message_includes_reasoning():
+    payload = {
+        "id": "chatcmpl_reason",
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "thinking hard",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+
+    out = chat_completion_to_anthropic_message(payload, "shim-model")
+
+    assert out["content"] == [
+        {"type": "thinking", "thinking": "thinking hard"},
+        {"type": "text", "text": "answer"},
+    ]
 
 def test_responses_to_chat_preserves_reasoning_and_effort_for_deepseek():
     body = {

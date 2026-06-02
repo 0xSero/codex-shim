@@ -725,7 +725,7 @@ def _anthropic_assistant_message_to_chat(content: Any) -> dict[str, Any]:
                 reasoning_parts.append(str(thinking))
         else:
             text_parts.append(block)
-    message: dict[str, Any] = {"role": "assistant", "content": _anthropic_content_to_chat_content(text_parts) if text_parts else None}
+    message: dict[str, Any] = {"role": "assistant", "content": _anthropic_content_to_chat_content(text_parts) if text_parts else ""}
     if tool_calls:
         message["tool_calls"] = tool_calls
     if reasoning_parts:
