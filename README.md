@@ -337,6 +337,16 @@ Supported `provider` values:
 | `generic-chat-completion-api` | OpenAI-shaped chat completions |
 | `anthropic` | Anthropic `/v1/messages` |
 
+The shim also accepts Anthropic Messages requests at
+`http://127.0.0.1:8765/v1/messages`. For `openai` and
+`generic-chat-completion-api` models, it translates Messages requests to
+OpenAI-shaped chat completions and converts responses back to Anthropic shape.
+For `anthropic` models, it passes the request through to the upstream
+`/messages` endpoint with the configured model name. The bridge supports text,
+image inputs, basic function tools/tool results, and streaming SSE. Provider
+features such as prompt caching, extended thinking signatures, files, and token
+counting remain upstream-specific.
+
 Useful model fields:
 
 | field | behavior |
