@@ -147,12 +147,10 @@ def opencode_go_model_row(
 def write_opencode_go_models(settings_path: Path, rows: list[dict[str, Any]], *, base_url: str = OPENCODE_GO_BASE_URL) -> None:
     path = Path(settings_path).expanduser()
     existing = _read_settings_json(path)
-    preserved = [row for row in _settings_rows(existing) if not _is_opencode_go_row(row, base_url)]
     payload = dict(existing) if isinstance(existing, dict) else {}
-    payload.pop("customModels", None)
-    payload.pop("launchModels", None)
-    payload.pop("launch_models", None)
-    payload["models"] = [*preserved, *rows]
+    target = next((k for k in ("models", "customModels", "launchModels", "launch_models") if k in payload), "models")
+    preserved = [row for row in _settings_rows(existing) if not _is_opencode_go_row(row, base_url)]
+    payload[target] = [*preserved, *rows]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n")
 

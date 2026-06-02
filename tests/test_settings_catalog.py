@@ -209,6 +209,39 @@ def test_write_opencode_go_models_replaces_previous_generated_rows(monkeypatch, 
     assert [model.api_key for model in models] == ["k", "ocgo-secret"]
 
 
+def test_write_opencode_go_models_preserves_legacy_custom_models_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "ocgo-secret")
+    settings = tmp_path / "models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "customModels": [
+                    {"model": "legacy", "provider": "openai", "baseUrl": "http://legacy/v1", "apiKey": "k"},
+                ]
+            }
+        )
+    )
+
+    write_opencode_go_models(
+        settings,
+        [
+            opencode_go_model_row(
+                "glm-5.1",
+                chat_status=200,
+                messages_status=200,
+                api_key_env="OPENCODE_GO_API_KEY",
+                base_url="https://opencode.ai/zen/go/v1",
+                prefer="chat",
+            )
+        ],
+    )
+
+    on_disk = json.loads(settings.read_text())
+    assert "customModels" in on_disk
+    assert "models" not in on_disk
+    assert [row["model"] for row in on_disk["customModels"]] == ["legacy", "glm-5.1"]
+
+
 def test_refresh_opencode_go_cli_writes_discovered_models(monkeypatch, tmp_path, capsys):
     settings = tmp_path / "models.json"
     monkeypatch.setenv("OPENCODE_GO_API_KEY", "ocgo-secret")
