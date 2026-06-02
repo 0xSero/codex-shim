@@ -608,12 +608,7 @@ class ShimServer:
         if route is None:
             raise web.HTTPNotFound(text=f"Unknown model slug/model: {requested}")
         if not byok_model_has_credentials(route):
-            raise web.HTTPUnauthorized(
-                text=(
-                    f"Model {route.slug} has no API key. "
-                    "Set CURSOR_API_KEY or create ~/.codex-shim/cursor-api-key."
-                )
-            )
+            raise web.HTTPUnauthorized(text=_missing_api_key_message(route))
         return route
 
     async def _post_openai_chat(
@@ -1491,6 +1486,13 @@ async def _error_response(upstream, *, slug: str | None = None) -> web.Response:
             flush=True,
         )
     return web.Response(status=upstream.status, text=text, content_type=upstream.content_type or "text/plain")
+
+
+def _missing_api_key_message(route: ShimModel) -> str:
+    env_name = route.raw.get("api_key_env") or route.raw.get("apiKeyEnv")
+    if env_name:
+        return f"Model {route.slug} has no API key. Set {env_name} or add api_key/apiKey for this model."
+    return f"Model {route.slug} has no API key. Add api_key/apiKey or api_key_env/apiKeyEnv for this model."
 
 
 def _normalize_roles(messages: list[dict]) -> list[dict]:

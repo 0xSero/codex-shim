@@ -229,6 +229,37 @@ async def test_responses_routes_to_openai_chat(tmp_path):
     await upstream_client.close()
 
 
+async def test_missing_api_key_env_has_model_specific_error(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENCODE_GO_API_KEY", raising=False)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "customModels": [
+                    {
+                        "model": "glm-5.1",
+                        "displayName": "OpenCode Go GLM-5.1",
+                        "provider": "generic-chat-completion-api",
+                        "baseUrl": "https://opencode.ai/zen/go/v1",
+                        "apiKeyEnv": "OPENCODE_GO_API_KEY",
+                    }
+                ]
+            }
+        )
+    )
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+
+    resp = await shim_client.post("/v1/responses", json={"model": "glm-5-1", "input": "hi"})
+
+    assert resp.status == 401
+    text = await resp.text()
+    assert "OPENCODE_GO_API_KEY" in text
+    assert "CURSOR_API_KEY" not in text
+
+    await shim_client.close()
+
+
 def _sse_events(text: str) -> list[dict]:
     events = []
     for block in text.split("\n\n"):

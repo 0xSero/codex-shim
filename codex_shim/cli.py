@@ -35,6 +35,11 @@ from .settings import (
     usable_byok_models,
     byok_model_has_credentials,
 )
+from .opencode_go import (
+    OPENCODE_GO_API_KEY_ENV,
+    OPENCODE_GO_BASE_URL,
+    refresh_opencode_go_settings,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("patch-app", help="Patch Codex Desktop picker/sidebar handling for custom shim models.")
     sub.add_parser("restore-app", help="Restore Codex Desktop app.asar from the pre-patch backup.")
 
+    opencode_parser = sub.add_parser("opencode-go", help="Discover and configure OpenCode Go models.")
+    opencode_sub = opencode_parser.add_subparsers(dest="opencode_go_command", required=True)
+    refresh_parser = opencode_sub.add_parser("refresh", help="Refresh OpenCode Go models into the settings file.")
+    refresh_parser.add_argument("--api-key-env", default=OPENCODE_GO_API_KEY_ENV)
+    refresh_parser.add_argument("--base-url", default=OPENCODE_GO_BASE_URL)
+    refresh_parser.add_argument("--prefer", choices=["chat", "messages"], default="chat")
+    refresh_parser.add_argument("--timeout", type=float, default=30.0)
+
     model_parser = sub.add_parser("model", help="List or set the active shim model in Codex config.")
     model_sub = model_parser.add_subparsers(dest="model_command", required=True)
     model_sub.add_parser("list")
@@ -123,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
         return patch_codex_app()
     if args.command == "restore-app":
         return restore_codex_app_bundle()
+    if args.command == "opencode-go":
+        if args.opencode_go_command == "refresh":
+            return refresh_opencode_go(args.settings, args.api_key_env, args.base_url, args.prefer, args.timeout)
     if args.command == "model":
         if args.model_command == "list":
             return list_models(args.settings)
@@ -171,6 +187,29 @@ def generate(settings_path: Path, port: int) -> None:
     print(f"  catalog: {CATALOG_PATH}")
     print(f"  config:  {CONFIG_PATH}")
     print("No files under ~/.codex were modified.")
+
+
+def refresh_opencode_go(settings_path: Path, api_key_env: str, base_url: str, prefer: str, timeout: float) -> int:
+    print(f"Refreshing OpenCode Go models from {base_url}...")
+    try:
+        result = refresh_opencode_go_settings(
+            settings_path,
+            api_key_env=api_key_env,
+            base_url=base_url,
+            prefer=prefer,
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"Refreshed {len(result.models)} OpenCode Go models into {result.settings_path}.")
+    if result.skipped:
+        print(f"Skipped {len(result.skipped)} models with no working probed endpoint:")
+        for model_id, chat_status, messages_status in result.skipped:
+            print(f"  {model_id}: chat={chat_status}, messages={messages_status}")
+    for row in result.models:
+        print(f"  {row['slug']}  ->  {row['model']} ({row['provider']}, {row['opencode_go_endpoint']})")
+    return 0
 
 
 def install_codex_config(settings_path: Path, port: int, model_slug: str | None = None) -> None:

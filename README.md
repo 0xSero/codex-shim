@@ -321,13 +321,14 @@ Recommended schema:
 }
 ```
 
-The loader also accepts camelCase aliases (`baseUrl`, `apiKey`, `displayName`,
-`maxContextLimit`, `maxOutputTokens`, `noImageSupport`, `extraHeaders`) and a
-legacy top-level `customModels` array, so existing model config exports can be
-used directly.
+The loader also accepts camelCase aliases (`baseUrl`, `apiKey`, `apiKeyEnv`,
+`displayName`, `maxContextLimit`, `maxOutputTokens`, `noImageSupport`,
+`extraHeaders`) and a legacy top-level `customModels` array, so existing model
+config exports can be used directly.
 
-The shim **never copies your API keys** into the generated catalog. Keys stay
-in your settings file and are read fresh on every request.
+The shim **never writes your API keys** into the generated catalog. Put literal
+keys in your settings file or reference them with `api_key_env`; credentials
+are resolved when requests are handled.
 
 Supported `provider` values:
 
@@ -342,10 +343,57 @@ Useful model fields:
 | field | behavior |
 |---|---|
 | `display_name` | Human-readable picker label. |
+| `api_key_env` | Name of an environment variable that contains the upstream API key. |
 | `max_context_limit` | Catalog context window and compaction limits. |
 | `max_output_tokens` | Default max output when translating to Anthropic. |
 | `no_image_support` | When true, catalog advertises text-only input. |
 | `extra_headers` | Optional upstream headers merged into requests. |
+
+### OpenCode Go
+
+OpenCode Go adds and updates models over time. Refresh the local settings from
+the live OpenCode Go catalog instead of copying a hard-coded model list:
+
+```bash
+export OPENCODE_GO_API_KEY="..."
+codex-shim opencode-go refresh
+codex-shim generate
+codex-shim start
+```
+
+The refresh command calls `https://opencode.ai/zen/go/v1/models`, probes each
+model through both `/chat/completions` and `/messages`, and writes `ocgo-*`
+entries into `~/.codex-shim/models.json`. Models that work through chat
+completions are configured as `generic-chat-completion-api`; models that only
+work through Messages are configured as `anthropic`.
+
+Use `--settings` to write a different file, `--api-key-env` to use a different
+environment variable name, or `--prefer messages` if you want models that
+support both routes to prefer Anthropic Messages:
+
+```bash
+codex-shim --settings /path/to/models.json opencode-go refresh --prefer messages
+```
+
+If you need a minimal manual fallback, add one model with the same key env:
+
+```json
+{
+  "models": [
+    {
+      "slug": "ocgo-glm-5-1",
+      "model": "glm-5.1",
+      "display_name": "OpenCode Go GLM 5.1",
+      "provider": "generic-chat-completion-api",
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "api_key_env": "OPENCODE_GO_API_KEY"
+    }
+  ]
+}
+```
+
+The current OpenCode Go model list and endpoint split are documented at
+<https://opencode.ai/docs/go/>.
 
 ### Ollama / local OpenAI-compatible chat endpoints
 
@@ -782,6 +830,8 @@ codex-shim stop              stop daemon
 codex-shim disable           remove managed config block and stop daemon
 codex-shim restart           stop, regenerate, and start daemon
 codex-shim list              list generated slugs and upstream routes
+codex-shim opencode-go refresh
+                            refresh OpenCode Go models into the settings file
 codex-shim model list        list slugs currently usable in the picker
 codex-shim model use <slug>  set the Desktop default model in managed config
 codex-shim codex -- <args>   exec `codex` CLI through inline shim overrides
