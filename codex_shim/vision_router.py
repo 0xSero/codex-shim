@@ -26,8 +26,9 @@ def has_image_in_current_turn(input_data: Any) -> bool:
     Detect if the CURRENT (latest) user turn contains image content.
 
     This is different from has_image_in_input which checks the entire history.
-    We only check the most recent user message to determine if the current
-    request requires vision capabilities.
+    We only check items that belong to the current turn — everything since the
+    latest assistant response — to determine if the current request requires
+    vision capabilities.
 
     Args:
         input_data: The input field from a Responses API request
@@ -38,26 +39,21 @@ def has_image_in_current_turn(input_data: Any) -> bool:
     if not isinstance(input_data, list):
         return False
 
-    # Find the last user message/input
+    # Walk backwards. The previous assistant message marks the end of the
+    # prior turn; anything after it (i.e. items we visit before hitting an
+    # assistant) is part of the current user turn.
     for item in reversed(input_data):
         if not isinstance(item, dict):
             continue
 
-        # Check if this is a user turn
-        if item.get("role") == "user" or item.get("type") in {"input_text", "input_image", "message"}:
-            # Check this item for images
-            item_type = item.get("type")
+        if item.get("role") == "assistant":
+            break
 
-            if item_type == "input_image":
-                return True
+        if item.get("type") == "input_image":
+            return True
 
-            content = item.get("content")
-            if _has_image_in_content(content):
-                return True
-
-            # If this is a user message, we found the latest turn
-            if item.get("role") == "user":
-                return False
+        if _has_image_in_content(item.get("content")):
+            return True
 
     return False
 
@@ -162,14 +158,15 @@ def has_image_in_recent_turns(input_data: Any, recent_turns: int = 3) -> bool:
     if not isinstance(input_data, list):
         return False
 
-    # Count turns from the end (most recent)
+    # A "turn" is one round of dialogue: a user message plus any following
+    # assistant/tool messages. We count user messages walking from the end —
+    # each user message marks the start of a new turn.
     turn_count = 0
     for item in reversed(input_data):
         if not isinstance(item, dict):
             continue
 
-        # Count user and assistant messages as turns
-        if item.get("role") in {"user", "assistant"} or item.get("type") == "message":
+        if item.get("role") == "user":
             turn_count += 1
             if turn_count > recent_turns:
                 break
