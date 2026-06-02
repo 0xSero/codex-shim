@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -691,7 +692,7 @@ class ShimServer:
             if upstream.status >= 400:
                 return await _error_response(upstream, slug=route.slug)
             if body.get("stream"):
-                return await self._stream_raw_sse(request, upstream)
+                return await self._stream_raw_sse(request, upstream, route.slug)
             payload = await upstream.json(content_type=None)
         if isinstance(payload, dict):
             payload["model"] = route.slug
@@ -794,12 +795,23 @@ class ShimServer:
             pass
         return response
 
-    async def _stream_raw_sse(self, request: web.Request, upstream) -> web.StreamResponse:
+    async def _stream_raw_sse(self, request: web.Request, upstream, model_slug: str | None = None) -> web.StreamResponse:
         response = _sse_response()
         await response.prepare(request)
         try:
-            async for chunk in upstream.content.iter_chunked(4096):
-                await _safe_write(response, chunk)
+            async for line in _sse_lines(upstream):
+                if model_slug and line.startswith("{"):
+                    try:
+                        event = json.loads(line)
+                        if isinstance(event, dict) and event.get("type") == "message_start":
+                            msg = event.get("message")
+                            if isinstance(msg, dict):
+                                msg["model"] = model_slug
+                        await _write_anthropic_sse(response, event.get("type", "message"), event)
+                        continue
+                    except json.JSONDecodeError:
+                        pass
+                await _safe_write(response, f"data: {line}\n\n".encode())
         except ClientDisconnected:
             pass
         finally:
@@ -863,7 +875,7 @@ class AnthropicMessagesStreamState:
     """Translates OpenAI chat-completions chunks into Anthropic Messages SSE."""
 
     def __init__(self, model: str):
-        self.message_id = f"msg_{int(time.time() * 1000)}"
+        self.message_id = f"msg_{uuid.uuid4().hex[:24]}"
         self.model = model
         self.next_index = 0
         self.text_index: int | None = None

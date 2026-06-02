@@ -971,7 +971,7 @@ def _anthropic_tools_to_chat_tools(tools: Any) -> list[dict[str, Any]]:
             {
                 "type": "function",
                 "function": {
-                    "name": _sanitize_tool_name(str(name)),
+                    "name": str(name),
                     "description": tool.get("description") or "",
                     "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
                 },
@@ -988,7 +988,7 @@ def _anthropic_tool_choice_to_chat(tool_choice: Any) -> Any:
             return tool_choice
         if tool_choice == "any":
             return "required"
-        return {"type": "function", "function": {"name": _sanitize_tool_name(tool_choice)}}
+        return {"type": "function", "function": {"name": tool_choice}}
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
         if choice_type in {"auto", "none"}:
@@ -996,7 +996,7 @@ def _anthropic_tool_choice_to_chat(tool_choice: Any) -> Any:
         if choice_type == "any":
             return "required"
         if choice_type == "tool" and tool_choice.get("name"):
-            return {"type": "function", "function": {"name": _sanitize_tool_name(str(tool_choice["name"]))}}
+            return {"type": "function", "function": {"name": str(tool_choice["name"])}}
     return tool_choice
 
 
