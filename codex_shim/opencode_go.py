@@ -174,12 +174,8 @@ def display_name_from_model_id(model_id: str) -> str:
             titled.append(aliases[lower])
         elif lower.startswith("qwen"):
             titled.append("Qwen" + part[4:])
-        elif lower.startswith("v") and len(lower) > 1 and lower[1].isdigit():
-            titled.append(part.upper())
-        elif lower.startswith("k") and len(lower) > 1 and lower[1].isdigit():
-            titled.append(part.upper())
-        elif lower.startswith("m") and len(lower) > 1 and lower[1].isdigit():
-            titled.append(part.upper())
+        elif part[0].isalpha() and len(part) > 1 and part[1:].isdigit():
+            titled.append(part[0].upper() + part[1:])
         else:
             titled.append(part.capitalize())
     return " ".join(titled)
@@ -241,7 +237,4 @@ def _settings_rows(data: Any) -> list[dict[str, Any]]:
 
 
 def _is_opencode_go_row(row: dict[str, Any], base_url: str) -> bool:
-    if row.get("generated_by") == OPENCODE_GO_GENERATED_BY:
-        return True
-    row_base = str(row.get("base_url") or row.get("baseUrl") or row.get("baseURL") or "").rstrip("/")
-    return row_base == base_url.rstrip("/") and str(row.get("slug") or "").startswith("ocgo-")
+    return row.get("generated_by") == OPENCODE_GO_GENERATED_BY

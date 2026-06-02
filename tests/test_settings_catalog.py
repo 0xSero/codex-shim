@@ -183,6 +183,7 @@ def test_write_opencode_go_models_replaces_previous_generated_rows(monkeypatch, 
                         "provider": "generic-chat-completion-api",
                         "base_url": "https://opencode.ai/zen/go/v1",
                         "api_key_env": "OPENCODE_GO_API_KEY",
+                        "generated_by": "codex-shim opencode-go refresh",
                     },
                 ]
             }
