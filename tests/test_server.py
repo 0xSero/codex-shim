@@ -752,3 +752,30 @@ async def test_switch_model_requires_slug(tmp_path, auth_missing):
         assert resp.status == 400
     finally:
         await shim_client.close()
+
+
+def test_join_url_handles_versioned_bases():
+    """_join_url must not double-inject /v1 when the base URL already ends with
+    a version segment like /v1 or /v3. Regression: Volces Ark coding endpoint
+    sits at /api/coding/v3 and 404'd because shim was appending an extra /v1/.
+    """
+    from codex_shim.server import _join_url
+
+    # Already versioned — endpoint appended as-is.
+    assert _join_url("https://api.openai.com/v1", "/chat/completions") == \
+        "https://api.openai.com/v1/chat/completions"
+    assert _join_url("https://ark.cn-beijing.volces.com/api/coding/v3", "/chat/completions") == \
+        "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
+    assert _join_url("https://example.com/api/v4", "/chat/completions") == \
+        "https://example.com/api/v4/chat/completions"
+    # Trailing slash should be tolerated.
+    assert _join_url("https://api.openai.com/v1/", "/chat/completions") == \
+        "https://api.openai.com/v1/chat/completions"
+
+    # Bare hosts — shim injects /v1 for backward compatibility.
+    assert _join_url("https://api.openai.com", "/chat/completions") == \
+        "https://api.openai.com/v1/chat/completions"
+    assert _join_url("https://api.anthropic.com", "/messages") == \
+        "https://api.anthropic.com/v1/messages"
+    assert _join_url("https://api.deepseek.com/anthropic", "/messages") == \
+        "https://api.deepseek.com/anthropic/v1/messages"

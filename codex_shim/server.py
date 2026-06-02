@@ -471,6 +471,11 @@ class ShimServer:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
         _dump_debug_request(route.slug, url, body)
+        print(
+            f"[route] slug={route.slug!r} provider={route.provider!r} "
+            f"upstream_model={route.model!r} url={url}",
+            flush=True,
+        )
         async with ClientSession(timeout=self.timeout) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
@@ -487,6 +492,11 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
+        print(
+            f"[route] slug={route.slug!r} provider={route.provider!r} "
+            f"upstream_model={route.model!r} url={url}",
+            flush=True,
+        )
         async with ClientSession(timeout=self.timeout) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
@@ -1131,7 +1141,10 @@ def _decode_thinking_payload(encoded: str) -> dict[str, Any] | None:
 
 def _join_url(base_url: str, endpoint: str) -> str:
     base = base_url.rstrip("/")
-    if base.endswith("/v1"):
+    # If the base URL already ends with a version segment like /v1, /v3, /v4…,
+    # treat it as fully qualified and just append the endpoint. This covers
+    # OpenAI (/v1), Volces Ark coding (/api/coding/v3), DeepSeek (/v1), etc.
+    if re.search(r"/v\d+$", base):
         return base + endpoint
     if endpoint == "/messages":
         return base + "/v1/messages"

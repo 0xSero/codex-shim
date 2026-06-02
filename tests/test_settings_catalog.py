@@ -278,24 +278,58 @@ def test_restore_app_fails_off_macos(monkeypatch, capsys):
     assert "macOS-only" in capsys.readouterr().err
 
 
+def _make_picker_bundle(vars_uo: str = "u", vars_c: str = "c", vars_o: str = "a", vars_d: str = "f") -> str:
+    return (
+        f"prefix let {vars_uo}={vars_c}.useHiddenModels&&{vars_o}!==`amazonBedrock`,{vars_d};"
+        f"return t[2]!=={vars_o} suffix"
+    )
+
+
+def _make_sidebar_bundle(sk: str = "ye") -> str:
+    return (
+        "prefix listRecentThreads({cursor:e,limit:t})"
+        "{return this.params.requestClient.sendRequest(`thread/list`,"
+        "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,"
+        f"modelProviders:null,archived:!1,sourceKinds:{sk}}})}}"
+        " suffix"
+    )
+
+
 def test_desktop_bundle_patch_applies_model_picker_and_sidebar(tmp_path):
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)
     model_bundle = assets / "model-queries-test.js"
     sidebar_bundle = assets / "app-server-manager-signals-test.js"
-    model_bundle.write_text(f"before {cli.MODEL_PICKER_NEEDLE} after")
-    sidebar_bundle.write_text(f"before {cli.SIDEBAR_RECENT_THREADS_NEEDLE} after")
+    model_bundle.write_text(_make_picker_bundle())
+    sidebar_bundle.write_text(_make_sidebar_bundle())
 
     assert cli._patch_codex_desktop_bundles(tmp_path) is True
-    assert cli.MODEL_PICKER_REPLACEMENT in model_bundle.read_text()
-    assert cli.SIDEBAR_RECENT_THREADS_REPLACEMENT in sidebar_bundle.read_text()
+    assert "let u=!1,f;" in model_bundle.read_text()
+    assert "modelProviders:[],archived:!1,sourceKinds:ye" in sidebar_bundle.read_text()
+    # Idempotent — second run should be a no-op.
     assert cli._patch_codex_desktop_bundles(tmp_path) is False
+
+
+def test_desktop_bundle_patch_handles_renamed_minifier_locals(tmp_path):
+    """New Codex Desktop builds shuffle obfuscated variable names; the regex
+    needles must still match and preserve those names in the replacement."""
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    model_bundle = assets / "model-queries-test.js"
+    sidebar_bundle = assets / "app-server-manager-signals-test.js"
+    # Old bundle names: o/d for picker, ke for sidebar.
+    model_bundle.write_text(_make_picker_bundle(vars_o="o", vars_d="d"))
+    sidebar_bundle.write_text(_make_sidebar_bundle(sk="ke"))
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is True
+    assert "let u=!1,d;" in model_bundle.read_text()
+    assert "modelProviders:[],archived:!1,sourceKinds:ke" in sidebar_bundle.read_text()
 
 
 def test_desktop_bundle_patch_fails_when_sidebar_needle_is_missing(tmp_path):
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)
-    (assets / "model-queries-test.js").write_text(cli.MODEL_PICKER_NEEDLE)
+    (assets / "model-queries-test.js").write_text(_make_picker_bundle())
     (assets / "app-server-manager-signals-test.js").write_text("different build")
 
     assert cli._patch_codex_desktop_bundles(tmp_path) is None

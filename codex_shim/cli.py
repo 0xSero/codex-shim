@@ -11,6 +11,7 @@ import time
 import hashlib
 import json
 import plistlib
+import re
 import struct
 from urllib.request import urlopen
 
@@ -44,15 +45,29 @@ PREVIOUS_TOP_LEVEL_PREFIX = "# codex-shim previous-top-level = "
 MANAGED_TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json"}
 APP_ASAR_BACKUP_NAME = "app.asar.before-codex-shim-model-picker-patch"
 INFO_PLIST_BACKUP_NAME = "Info.plist.before-codex-shim-model-picker-patch"
-MODEL_PICKER_NEEDLE = "let u=c.useHiddenModels&&o!==`amazonBedrock`,d;"
-MODEL_PICKER_REPLACEMENT = "let u=!1,d;"
-SIDEBAR_RECENT_THREADS_NEEDLE = (
-    "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:ke})}"
+
+# Picker allowlist needle. Codex Desktop's minifier renames the local vars
+# between releases (e.g. o→a, d→f), so match the surrounding shape and
+# preserve the captured names in the replacement so this keeps working across
+# bundle revisions.
+MODEL_PICKER_NEEDLE = re.compile(
+    r"let (\w+)=\w+\.useHiddenModels&&\w+!==`amazonBedrock`,(\w+);"
+)
+MODEL_PICKER_REPLACEMENT = r"let \1=!1,\2;"
+# Post-patch line is `let X=!1,Y;return ...` — specific enough to distinguish
+# from random minified `let X=!1,Y;` declarations elsewhere.
+MODEL_PICKER_APPLIED = re.compile(r"let \w+=!1,\w+;return ")
+
+SIDEBAR_RECENT_THREADS_NEEDLE = re.compile(
+    r"listRecentThreads\(\{cursor:e,limit:t\}\)\{return this\.params\.requestClient\.sendRequest\(`thread/list`,"
+    r"\{limit:t,cursor:e,sortKey:this\.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:(\w+)\}\)\}"
 )
 SIDEBAR_RECENT_THREADS_REPLACEMENT = (
-    "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:ke})}"
+    r"listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
+    r"{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:\1})}"
+)
+SIDEBAR_RECENT_THREADS_APPLIED = re.compile(
+    r"\.recentConversationSortKey,modelProviders:\[\],archived:!1,sourceKinds:\w+"
 )
 
 
@@ -304,8 +319,25 @@ def exec_codex(settings_path: Path, port: int, codex_args: list[str]) -> None:
 
 def exec_codex_app(settings_path: Path, port: int, path: str) -> None:
     _quit_codex_app()
-    args = ["codex", "app", path]
-    subprocess.Popen(args, env=_with_loopback_no_proxy(os.environ.copy()))
+    # Try codex CLI first; fall back to direct macOS app launch if not installed
+    import shutil
+    if shutil.which("codex"):
+        args = ["codex", "app", path]
+        subprocess.Popen(args, env=_with_loopback_no_proxy(os.environ.copy()))
+    else:
+        # codex CLI not found - launch Codex Desktop directly via macOS
+        if sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", "-a", "Codex"],
+                env=_with_loopback_no_proxy(os.environ.copy()),
+            )
+        else:
+            print(
+                "codex CLI not found and not on macOS. "
+                "Please install codex CLI or open Codex Desktop manually.",
+                file=sys.stderr,
+            )
+            return
     _foreground_codex_app()
 
 
@@ -442,21 +474,23 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
             ["model-queries-*.js", "*.js"],
             MODEL_PICKER_NEEDLE,
             MODEL_PICKER_REPLACEMENT,
+            MODEL_PICKER_APPLIED,
         ),
         (
             "shim-mode sidebar provider filter",
             ["app-server-manager-signals-*.js", "*.js"],
             SIDEBAR_RECENT_THREADS_NEEDLE,
             SIDEBAR_RECENT_THREADS_REPLACEMENT,
+            SIDEBAR_RECENT_THREADS_APPLIED,
         ),
     ]
     changed = False
-    for label, globs, needle, replacement in patches:
-        bundle_file = _find_js_bundle(workdir, globs, needle, replacement)
+    for label, globs, needle, replacement, applied in patches:
+        bundle_file = _find_js_bundle(workdir, globs, needle, applied)
         if bundle_file is None:
             print(f"Could not find the expected {label} in Codex Desktop.", file=sys.stderr)
             return None
-        result = _replace_once(bundle_file, needle, replacement)
+        result = _replace_once(bundle_file, needle, replacement, applied)
         if result is None:
             print(f"Could not patch the expected {label} in Codex Desktop.", file=sys.stderr)
             return None
@@ -468,7 +502,12 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
     return changed
 
 
-def _find_js_bundle(workdir: Path, globs: list[str], needle: str, replacement: str) -> Path | None:
+def _find_js_bundle(
+    workdir: Path,
+    globs: list[str],
+    needle: re.Pattern[str],
+    applied: re.Pattern[str],
+) -> Path | None:
     assets_dir = workdir / "webview" / "assets"
     if not assets_dir.exists():
         return None
@@ -477,19 +516,27 @@ def _find_js_bundle(workdir: Path, globs: list[str], needle: str, replacement: s
         candidates.extend(p for p in sorted(assets_dir.glob(pattern)) if p not in candidates)
     for path in candidates:
         text = _read_text_lossy(path)
-        if needle in text or replacement in text:
+        if needle.search(text) or applied.search(text):
             return path
     return None
 
 
-def _replace_once(path: Path, needle: str, replacement: str) -> bool | None:
+def _replace_once(
+    path: Path,
+    needle: re.Pattern[str],
+    replacement: str,
+    applied: re.Pattern[str],
+) -> bool | None:
     text = _read_text_lossy(path)
-    if replacement in text:
-        return False
-    count = text.count(needle)
-    if count != 1:
+    matches = needle.findall(text)
+    if not matches:
+        # Already patched? Acceptable; treat as no-op.
+        if applied.search(text):
+            return False
         return None
-    path.write_text(text.replace(needle, replacement, 1))
+    if len(matches) != 1:
+        return None
+    path.write_text(needle.sub(replacement, text, count=1))
     return True
 
 
