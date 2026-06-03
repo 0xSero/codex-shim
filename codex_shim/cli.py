@@ -14,19 +14,21 @@ import plistlib
 import struct
 from urllib.request import urlopen
 
+from . import router as router_module
 from .catalog import _toml_escape, codex_config_overrides, write_catalog, write_config
 from .settings import (
     CHATGPT_LEGACY_ALIASES,
-    CHATGPT_MODEL_SLUG,
-    CHATGPT_PASSTHROUGH_MODELS,
-    CHATGPT_PASSTHROUGH_SLUGS,
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
     PROVIDER_NAME,
     ModelSettings,
+    available_model_slugs,
     chatgpt_passthrough_available,
+    chatgpt_passthrough_display_names,
+    chatgpt_passthrough_slugs,
     default_model_slug,
+    is_chatgpt_passthrough_slug,
 )
 
 
@@ -49,11 +51,21 @@ APP_ASAR_BACKUP_NAME = "app.asar.before-codex-shim-model-picker-patch"
 INFO_PLIST_BACKUP_NAME = "Info.plist.before-codex-shim-model-picker-patch"
 MODEL_PICKER_NEEDLE = "let u=c.useHiddenModels&&a!==`amazonBedrock`,f;"
 MODEL_PICKER_REPLACEMENT = "let u=!1,f;"
+MODEL_PICKER_REASONING_NEEDLE = "let a=[],o=null,s=i&&e!==`amazonBedrock`;return r.forEach"
+MODEL_PICKER_REASONING_REPLACEMENT = "let a=[],o=null,s=!1;return r.forEach"
 SIDEBAR_RECENT_THREADS_NEEDLE = (
     "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:ye}"
 )
 SIDEBAR_RECENT_THREADS_REPLACEMENT = (
     "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:ye}"
+)
+SIDEBAR_RECENT_THREADS_V2_NEEDLE = (
+    "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:he})}"
+)
+SIDEBAR_RECENT_THREADS_V2_REPLACEMENT = (
+    "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:he})}"
 )
 
 
@@ -148,15 +160,25 @@ def _load_models(settings_path: Path):
         raise SystemExit(f"Settings file is not valid JSON: {expanded}: {exc}") from exc
 
 
+def _active_router(models, settings_path: Path):
+    config = router_module.load_router_config(Path(settings_path).expanduser())
+    if config and router_module.router_is_active(config, available_model_slugs(models)):
+        return config
+    return None
+
+
 def generate(settings_path: Path, port: int) -> None:
     models = _load_models(settings_path)
     try:
         default_model_slug(models)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    write_catalog(models, CATALOG_PATH)
+    router_config = router_module.load_router_config(Path(settings_path).expanduser())
+    write_catalog(models, CATALOG_PATH, router_config=router_config)
     write_config(models, CONFIG_PATH, CATALOG_PATH, port)
     print(f"Generated {len(models)} model entries:")
+    if _active_router(models, settings_path) is not None:
+        print(f"  auto router: {router_config.slug} ({router_config.display_name})")
     print(f"  catalog: {CATALOG_PATH}")
     print(f"  config:  {CONFIG_PATH}")
     print("No files under ~/.codex were modified.")
@@ -164,7 +186,8 @@ def generate(settings_path: Path, port: int) -> None:
 
 def install_codex_config(settings_path: Path, port: int, model_slug: str | None = None) -> None:
     models = _load_models(settings_path)
-    default_slug = _resolve_model_slug(models, model_slug)
+    router_config = _active_router(models, settings_path)
+    default_slug = _resolve_model_slug(models, model_slug, router_config)
     CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     original = CODEX_CONFIG_PATH.read_text() if CODEX_CONFIG_PATH.exists() else ""
@@ -186,11 +209,11 @@ def install_codex_config(settings_path: Path, port: int, model_slug: str | None 
 def list_models(settings_path: Path) -> int:
     models = _load_models(settings_path)
     rows: list[tuple[str, str, str, str]] = []
+    router_config = _active_router(models, settings_path)
+    if router_config is not None:
+        rows.append((router_config.slug, router_config.display_name, "per-task pick", "auto"))
     if chatgpt_passthrough_available():
-        rows.extend(
-            (model["slug"], model["display_name"], model["slug"], "chatgpt")
-            for model in CHATGPT_PASSTHROUGH_MODELS
-        )
+        rows.extend((slug, display_name, slug, "chatgpt") for slug, display_name in chatgpt_passthrough_display_names().items())
     rows.extend((model.slug, model.display_name, model.model, model.provider) for model in models)
     if not rows:
         print(
@@ -443,26 +466,36 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
     patches = [
         (
             "model picker allowlist filter",
-            ["model-queries-*.js", "*.js"],
-            MODEL_PICKER_NEEDLE,
-            MODEL_PICKER_REPLACEMENT,
+            [
+                (["model-queries-*.js", "*.js"], MODEL_PICKER_NEEDLE, MODEL_PICKER_REPLACEMENT),
+                (
+                    ["models-and-reasoning-efforts-*.js", "*.js"],
+                    MODEL_PICKER_REASONING_NEEDLE,
+                    MODEL_PICKER_REASONING_REPLACEMENT,
+                ),
+            ],
         ),
         (
             "shim-mode sidebar provider filter",
-            ["app-server-manager-signals-*.js", "*.js"],
-            SIDEBAR_RECENT_THREADS_NEEDLE,
-            SIDEBAR_RECENT_THREADS_REPLACEMENT,
+            [
+                (
+                    ["app-server-manager-signals-*.js", "*.js"],
+                    SIDEBAR_RECENT_THREADS_NEEDLE,
+                    SIDEBAR_RECENT_THREADS_REPLACEMENT,
+                ),
+                (
+                    ["app-server-manager-signals-*.js", "*.js"],
+                    SIDEBAR_RECENT_THREADS_V2_NEEDLE,
+                    SIDEBAR_RECENT_THREADS_V2_REPLACEMENT,
+                ),
+            ],
         ),
     ]
     changed = False
-    for label, globs, needle, replacement in patches:
-        bundle_file = _find_js_bundle(workdir, globs, needle, replacement)
-        if bundle_file is None:
-            print(f"Could not find the expected {label} in Codex Desktop.", file=sys.stderr)
-            return None
-        result = _replace_once(bundle_file, needle, replacement)
+    for label, variants in patches:
+        result = _apply_first_matching_bundle_patch(workdir, variants)
         if result is None:
-            print(f"Could not patch the expected {label} in Codex Desktop.", file=sys.stderr)
+            print(f"Could not find the expected {label} in Codex Desktop.", file=sys.stderr)
             return None
         if result:
             changed = True
@@ -470,6 +503,17 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
         else:
             print(f"Codex Desktop {label} patch is already applied.")
     return changed
+
+
+def _apply_first_matching_bundle_patch(
+    workdir: Path, variants: list[tuple[list[str], str, str]]
+) -> bool | None:
+    for globs, needle, replacement in variants:
+        bundle_file = _find_js_bundle(workdir, globs, needle, replacement)
+        if bundle_file is None:
+            continue
+        return _replace_once(bundle_file, needle, replacement)
+    return None
 
 
 def _find_js_bundle(workdir: Path, globs: list[str], needle: str, replacement: str) -> Path | None:
@@ -682,8 +726,9 @@ def _terminate_pid(pid: int) -> None:
 
 def _override_args(settings_path: Path, port: int) -> list[str]:
     models = _load_models(settings_path)
+    router_config = _active_router(models, settings_path)
     try:
-        default_slug = default_model_slug(models)
+        default_slug = _resolve_model_slug(models, None, router_config)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     pairs = codex_config_overrides(CATALOG_PATH, default_slug, port)
@@ -693,23 +738,24 @@ def _override_args(settings_path: Path, port: int) -> list[str]:
     return args
 
 
-def _resolve_model_slug(models, requested: str | None) -> str:
+def _resolve_model_slug(models, requested: str | None, router_config=None) -> str:
     if requested is None:
         current = _current_managed_model()
-        if current in _valid_model_slugs(models):
+        if current in _valid_model_slugs(models, router_config):
             return current
         try:
             return default_model_slug(models)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-    legacy_alias = CHATGPT_LEGACY_ALIASES.get(requested)
-    if legacy_alias or requested in CHATGPT_PASSTHROUGH_SLUGS:
+    if router_config is not None and requested == router_config.slug:
+        return requested
+    if is_chatgpt_passthrough_slug(requested):
         if not chatgpt_passthrough_available():
             raise SystemExit(
                 f"{requested} passthrough requires a Codex login. "
                 "Run `codex login` so ~/.codex/auth.json contains tokens.access_token."
             )
-        return legacy_alias or requested
+        return CHATGPT_LEGACY_ALIASES.get(requested, requested)
     by_slug = {model.slug: model.slug for model in models}
     by_model = {}
     for model in models:
@@ -743,10 +789,12 @@ def _current_managed_model() -> str | None:
     return None
 
 
-def _valid_model_slugs(models) -> set[str]:
+def _valid_model_slugs(models, router_config=None) -> set[str]:
     slugs = {model.slug for model in models}
+    if router_config is not None:
+        slugs.add(router_config.slug)
     if chatgpt_passthrough_available():
-        slugs.update(CHATGPT_PASSTHROUGH_SLUGS)
+        slugs.update(chatgpt_passthrough_slugs())
     return slugs
 
 

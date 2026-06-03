@@ -36,6 +36,9 @@ local:
   access token, the shim can route Codex's native `/v1/responses` traffic to
   ChatGPT's Codex backend under first-party slugs such as `gpt-5.5`,
   `gpt-5.4`, and `gpt-5.4-mini`.
+- **Auto Router (optional).** Add one extra picker entry, `codex-auto`, that
+  classifies each task and routes it to the cheapest configured model that is
+  likely to succeed.
 - **Prompt-catching/proxy-friendly architecture.** Put a local proxy in front
   of the shim to dedupe boilerplate, inject stable instructions, repair
   pseudo-tool text, or route prompts by policy before they hit an upstream.
@@ -229,6 +232,12 @@ Generated runtime files live under the repo-local `.codex-shim/` directory:
 
 The server binds `127.0.0.1` by default. It is meant to be a local loopback
 adapter, not an Internet-facing proxy.
+
+You can also inspect the running shim from a browser:
+
+```text
+http://127.0.0.1:8765/picker
+```
 
 ### 2. Point Codex Desktop at it
 
@@ -611,6 +620,26 @@ OpenAI's opaque encrypted compaction items.
 
 ---
 
+## Auto Router (smart routing)
+
+Optionally add one extra picker entry, `codex-auto`, that scores each task
+against a configured candidate set and then routes to the cheapest model whose
+score clears a threshold. Decisions are cached per task, so tool-call follow-up
+turns reuse the first classification instead of re-scoring every request.
+
+Configuration lives in the optional top-level `router` block in
+`~/.codex-shim/models.json`. The shim also honors these environment variables:
+
+- `CODEX_SHIM_DISABLE_ROUTER=1`
+- `CODEX_SHIM_ROUTER_TIMEOUT=<seconds>`
+- `CODEX_SHIM_ROUTER_MAX_TOKENS=<int>`
+- `CODEX_SHIM_ROUTER_LOG=1`
+
+See [`docs/AUTO_ROUTER.md`](docs/AUTO_ROUTER.md) for the full settings shape,
+selection behavior, and an end-to-end example.
+
+---
+
 ## Computer use, shell commands, images, and MCP
 
 The generated catalog advertises the Codex-facing capabilities Codex needs to
@@ -789,7 +818,7 @@ use `--settings`, and exit with a clear error on Windows/Linux.
 The shim exposes a small browser UI for switching the active model without
 restarting the CLI:
 
-- `GET /picker` — self-contained HTML page (dark theme) listing every model
+- `http://127.0.0.1:8765/picker` — self-contained HTML page listing every model
   the shim currently knows about, with the active one highlighted.
 - `GET /api/models` — JSON list backing the picker.
 - `POST /api/switch` — `{"slug": "...", "restart_codex": true|false}`. The
@@ -801,6 +830,37 @@ restarting the CLI:
 
 All picker routes are behind the same `Host`-header allowlist as the rest of
 the shim, so a visited web page cannot drive them via DNS rebinding.
+
+## Local server endpoints
+
+When the daemon is running, these loopback URLs are available:
+
+| Endpoint | Use |
+|---|---|
+| `GET http://127.0.0.1:8765/picker` | Browser UI for selecting the active model. |
+| `GET http://127.0.0.1:8765/health` | Health check with model count and ChatGPT passthrough status. |
+| `GET http://127.0.0.1:8765/v1/models` | OpenAI-compatible model list consumed by clients. |
+| `GET http://127.0.0.1:8765/api/models` | Picker JSON with display names, providers, slugs, and active flag. |
+| `POST http://127.0.0.1:8765/api/switch` | Picker API to set the active model in `~/.codex/config.toml`. |
+| `POST http://127.0.0.1:8765/v1/responses` | Responses-compatible endpoint used by Codex. |
+| `POST http://127.0.0.1:8765/v1/responses/compact` | Compact endpoint used by Codex during conversation compaction. |
+| `POST http://127.0.0.1:8765/v1/chat/completions` | Chat-completions compatibility endpoint for OpenAI-shaped clients. |
+
+Quick checks:
+
+```bash
+curl http://127.0.0.1:8765/health
+curl http://127.0.0.1:8765/v1/models
+curl http://127.0.0.1:8765/api/models
+```
+
+Switch from the API:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/switch \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"deepseek-v4-flash","restart_codex":false}'
+```
 
 ---
 

@@ -300,6 +300,20 @@ def test_desktop_bundle_patch_applies_model_picker_and_sidebar(tmp_path):
     assert cli._patch_codex_desktop_bundles(tmp_path) is False
 
 
+def test_desktop_bundle_patch_applies_current_picker_and_sidebar(tmp_path):
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    model_bundle = assets / "models-and-reasoning-efforts-test.js"
+    sidebar_bundle = assets / "app-server-manager-signals-test.js"
+    model_bundle.write_text(f"before {cli.MODEL_PICKER_REASONING_NEEDLE} after")
+    sidebar_bundle.write_text(f"before {cli.SIDEBAR_RECENT_THREADS_V2_NEEDLE} after")
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is True
+    assert cli.MODEL_PICKER_REASONING_REPLACEMENT in model_bundle.read_text()
+    assert cli.SIDEBAR_RECENT_THREADS_V2_REPLACEMENT in sidebar_bundle.read_text()
+    assert cli._patch_codex_desktop_bundles(tmp_path) is False
+
+
 def test_desktop_bundle_patch_fails_when_sidebar_needle_is_missing(tmp_path):
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)

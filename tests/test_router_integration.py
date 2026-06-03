@@ -339,6 +339,7 @@ async def test_anthropic_classifier_scores_and_routes(tmp_path):
     assert len(classifier_reqs) == 1
     assert _ci_get(classifier_reqs[0]["headers"], "x-api-key") == "xk"
     assert _ci_get(classifier_reqs[0]["headers"], "anthropic-version")
+    assert _ci_get(classifier_reqs[0]["headers"], "Authorization") is None
 
     await shim.close()
     await upstream.close()

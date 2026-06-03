@@ -44,6 +44,24 @@ def chatgpt_passthrough_available(auth_path: Path | None = None) -> bool:
     return bool(tokens.get("access_token"))
 
 
+def chatgpt_passthrough_slugs() -> set[str]:
+    return set(CHATGPT_PASSTHROUGH_SLUGS)
+
+
+def chatgpt_passthrough_display_names() -> dict[str, str]:
+    return {str(model["slug"]): str(model["display_name"]) for model in CHATGPT_PASSTHROUGH_MODELS}
+
+
+def is_chatgpt_passthrough_slug(slug: str) -> bool:
+    return slug in CHATGPT_PASSTHROUGH_SLUGS or slug in CHATGPT_LEGACY_ALIASES or slug.startswith("openai-gpt-5-5")
+
+
+def chatgpt_upstream_model(slug: str) -> str:
+    if slug.startswith("openai-gpt-5-5"):
+        return CHATGPT_MODEL_SLUG
+    return CHATGPT_LEGACY_ALIASES.get(slug, slug if slug in CHATGPT_PASSTHROUGH_SLUGS else CHATGPT_MODEL_SLUG)
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "model"
@@ -142,6 +160,11 @@ class ModelSettings:
             return matches[0]
         return None
 
+    def load_router(self):
+        from .router import load_router_config
+
+        return load_router_config(self.path)
+
 
 def _model_rows(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
@@ -220,3 +243,18 @@ def default_model_slug(models: list[ShimModel], include_chatgpt: bool | None = N
         "No usable codex-shim models: add models to ~/.codex-shim/models.json, run `codex login`, "
         "or unset CODEX_SHIM_DISABLE_CHATGPT if ChatGPT passthrough should be used."
     )
+
+
+def usable_byok_models(models: list[ShimModel]) -> list[ShimModel]:
+    return [model for model in models if byok_model_has_credentials(model)]
+
+
+def available_model_slugs(models: list[ShimModel]) -> set[str]:
+    slugs = {model.slug for model in usable_byok_models(models)}
+    if chatgpt_passthrough_available():
+        slugs |= chatgpt_passthrough_slugs()
+    return slugs
+
+
+def byok_model_has_credentials(model: ShimModel) -> bool:
+    return bool(model.api_key.strip())
