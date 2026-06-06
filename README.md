@@ -35,6 +35,14 @@ local:
 - **ChatGPT/Codex passthrough.** If `~/.codex/auth.json` has a valid Codex
   access token, the shim can route Codex's native `/v1/responses` traffic to
   ChatGPT's Codex backend under the `gpt-5.5` slug used by current Codex builds.
+- **Cursor/Composer passthrough.** If `cursor-agent login` is active, the shim
+  exposes `composer-2-5` and routes through your Cursor subscription — no
+  Dashboard API key (`crsr_…`) required. See
+  [`docs/subscription-integration.md`](docs/subscription-integration.md).
+- **Auto Router (optional).** Add an `Auto (smart routing)` picker entry that
+  uses a cheap classifier model to route each task to the cheapest configured
+  model that can handle it — trivial turns stay cheap, hard turns escalate. See
+  [`docs/AUTO_ROUTER.md`](docs/AUTO_ROUTER.md).
 - **Prompt-catching/proxy-friendly architecture.** Put a local proxy in front
   of the shim to dedupe boilerplate, inject stable instructions, repair
   pseudo-tool text, or route prompts by policy before they hit an upstream.
@@ -510,6 +518,31 @@ that prefix as an alias and routes it to the same passthrough.
 
 ---
 
+## Cursor/Composer passthrough (subscription)
+
+If `cursor-agent status` shows you are logged in, the shim exposes
+**Composer 2.5** as slug `composer-2-5` and routes each request by spawning
+`cursor-agent` with your CLI OAuth session — the same pattern
+[Open Design](https://github.com/nexu-io/open-design) uses for Cursor Agent.
+
+```bash
+cursor-agent login
+scripts/codex-shim-install-cursor-composer
+codex-shim model use composer-2-5
+codex-app
+```
+
+The install helper is optional; it regenerates the local catalog/config and
+sets `composer-2-5` as the active model when `cursor-agent status` reports an
+active login. Troubleshoot with `cursor-agent status` and `/health`, which
+reports `cursor_passthrough: true` when the shim can expose Composer.
+
+Do **not** configure Composer via `cursor-api.standardagents.ai` unless you
+intentionally want Dashboard API-key billing (`crsr_…`). That path is BYOK,
+not CLI subscription.
+
+---
+
 ## How routing works
 
 ```text
@@ -532,6 +565,53 @@ The shim translates Codex's Responses-API request into the upstream's shape
 (chat completions or Anthropic Messages) and translates the streamed reply back.
 Extended-thinking blocks from Anthropic-shaped upstreams (Claude, DeepSeek,
 GLM, etc.) round-trip through `reasoning.encrypted_content` items.
+
+---
+
+## Auto Router (smart routing)
+
+Optionally add one extra picker entry — **`Auto (smart routing)`** (slug
+`codex-auto`) — that chooses the right model *per task*: trivial turns go to a
+cheap model, hard turns escalate to your strongest one. It runs entirely on the
+models you already configure.
+
+On each new task the shim asks a cheap **classifier** model you nominate to score
+every candidate `0.0–1.0` (how likely it nails the task first try), reading a
+short **capability card** per candidate. It then routes to the **cheapest
+candidate whose score clears `threshold`** (default `0.7`), caches that decision
+for the task's tool-call round-trips, and falls back safely on any error. The
+classifier never sees price, so it can't be biased toward expensive models.
+
+Turn it on by adding a `router` block to `~/.codex-shim/models.json`:
+
+```jsonc
+"router": {
+  "enabled": true,
+  "slug": "codex-auto",
+  "classifier": "minimax-m3",        // slug of a cheap configured model
+  "threshold": 0.7,
+  "default": "minimax-m3",
+  "cache": true,
+  "candidates": [
+    { "slug": "minimax-m3", "cost": 0.3, "supports_images": false,
+      "card": "Cheap, fast. Single-file edits, codegen, simple refactors." },
+    { "slug": "opus", "cost": 5.0, "supports_images": true,
+      "card": "Frontier. Big multi-file refactors, hard debugging, images." }
+  ]
+}
+```
+
+Prove it end to end with no keys and no network:
+
+```bash
+python3 examples/auto_router_demo.py
+```
+
+It spins up a mock multi-backend server, starts the **real** shim with the router
+on, and shows trivial→cheap, medium→mid, hard→strong, image→image-capable, and a
+repeat served from cache. Full configuration, env knobs (`CODEX_SHIM_ROUTER_LOG`,
+`CODEX_SHIM_DISABLE_ROUTER`, …), and failure behavior are in
+[`docs/AUTO_ROUTER.md`](docs/AUTO_ROUTER.md).
 
 ---
 

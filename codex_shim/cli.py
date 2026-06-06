@@ -15,7 +15,13 @@ import re
 import struct
 from urllib.request import urlopen
 
+from . import router as router_module
 from .catalog import _toml_escape, codex_config_overrides, write_catalog, write_config
+from .cursor_passthrough import (
+    cursor_passthrough_available,
+    cursor_passthrough_display_names,
+    is_cursor_passthrough_slug,
+)
 from .settings import (
     CHATGPT_MODEL_SLUG,
     DEFAULT_SETTINGS,
@@ -23,8 +29,14 @@ from .settings import (
     DEFAULT_PORT,
     PROVIDER_NAME,
     ModelSettings,
+    available_model_slugs,
     chatgpt_passthrough_available,
+    chatgpt_passthrough_display_names,
+    chatgpt_passthrough_slugs,
     default_model_slug,
+    is_chatgpt_passthrough_slug,
+    usable_byok_models,
+    byok_model_has_credentials,
 )
 
 
@@ -45,6 +57,14 @@ PREVIOUS_TOP_LEVEL_PREFIX = "# codex-shim previous-top-level = "
 MANAGED_TOP_LEVEL_KEYS = {"model", "model_provider", "model_catalog_json"}
 APP_ASAR_BACKUP_NAME = "app.asar.before-codex-shim-model-picker-patch"
 INFO_PLIST_BACKUP_NAME = "Info.plist.before-codex-shim-model-picker-patch"
+
+# Codex Desktop install locations. Upstream added support for patching a
+# user-local copy at ~/Applications/Codex.app alongside the system install at
+# /Applications/Codex.app, so the launcher can prefer whichever bundle has
+# actually been patched. Both constants are referenced by
+# patched_codex_app_bundle() and the resign/launch helpers further down.
+SYSTEM_CODEX_APP = Path("/Applications/Codex.app")
+USER_CODEX_APP = Path.home() / "Applications" / "Codex.app"
 
 # Picker allowlist needle. The filter logic moved between bundles:
 # - Older Codex Desktop builds inlined it in model-queries-*.js as
@@ -177,15 +197,26 @@ def _load_models(settings_path: Path):
         raise SystemExit(f"Settings file is not valid JSON: {expanded}: {exc}") from exc
 
 
+def _active_router(models, settings_path: Path):
+    """RouterConfig when the Auto Router is enabled and has a usable candidate."""
+    config = router_module.load_router_config(Path(settings_path).expanduser())
+    if config and router_module.router_is_active(config, available_model_slugs(models)):
+        return config
+    return None
+
+
 def generate(settings_path: Path, port: int) -> None:
     models = _load_models(settings_path)
     try:
         default_model_slug(models)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    write_catalog(models, CATALOG_PATH)
+    router_config = router_module.load_router_config(Path(settings_path).expanduser())
+    write_catalog(models, CATALOG_PATH, router_config=router_config)
     write_config(models, CONFIG_PATH, CATALOG_PATH, port)
     print(f"Generated {len(models)} model entries:")
+    if _active_router(models, settings_path) is not None:
+        print(f"  auto router: {router_config.slug} ({router_config.display_name})")
     print(f"  catalog: {CATALOG_PATH}")
     print(f"  config:  {CONFIG_PATH}")
     print("No files under ~/.codex were modified.")
@@ -193,7 +224,8 @@ def generate(settings_path: Path, port: int) -> None:
 
 def install_codex_config(settings_path: Path, port: int, model_slug: str | None = None) -> None:
     models = _load_models(settings_path)
-    default_slug = _resolve_model_slug(models, model_slug)
+    router_config = _active_router(models, settings_path)
+    default_slug = _resolve_model_slug(models, model_slug, router_config)
     CODEX_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     original = CODEX_CONFIG_PATH.read_text() if CODEX_CONFIG_PATH.exists() else ""
@@ -207,7 +239,10 @@ def install_codex_config(settings_path: Path, port: int, model_slug: str | None 
         previous_top_level = _extract_top_level_key_lines(CODEX_CONFIG_BACKUP_PATH.read_text(), MANAGED_TOP_LEVEL_KEYS)
     cleaned = _remove_top_level_keys(cleaned, MANAGED_TOP_LEVEL_KEYS)
     cleaned = _remove_section(cleaned, f"model_providers.{PROVIDER_NAME}")
-    top_block, provider_block = _managed_config_blocks(default_slug, port, previous_top_level)
+    provider_name = _provider_display_name(models, default_slug, router_config)
+    top_block, provider_block = _managed_config_blocks(
+        default_slug, port, previous_top_level, provider_name=provider_name
+    )
     CODEX_CONFIG_PATH.write_text(top_block + "\n" + cleaned.lstrip() + "\n" + provider_block)
     print(f"Installed shim config into {CODEX_CONFIG_PATH}.")
 
@@ -215,13 +250,23 @@ def install_codex_config(settings_path: Path, port: int, model_slug: str | None 
 def list_models(settings_path: Path) -> int:
     models = _load_models(settings_path)
     rows: list[tuple[str, str, str, str]] = []
+    router_config = _active_router(models, settings_path)
+    if router_config is not None:
+        rows.append((router_config.slug, router_config.display_name, "per-task pick", "auto"))
     if chatgpt_passthrough_available():
-        rows.append(("gpt-5.5", "GPT-5.5", "gpt-5.5", "chatgpt"))
-    rows.extend((model.slug, model.display_name, model.model, model.provider) for model in models)
+        for slug, display_name in chatgpt_passthrough_display_names().items():
+            rows.append((slug, display_name, slug, "chatgpt"))
+    if cursor_passthrough_available():
+        for slug, display_name in cursor_passthrough_display_names().items():
+            rows.append((slug, display_name, "composer-2.5", "cursor-subscription"))
+    rows.extend((model.slug, model.display_name, model.model, model.provider) for model in usable_byok_models(models))
+    for model in models:
+        if model not in usable_byok_models(models):
+            rows.append((model.slug, f"{model.display_name} (missing API key)", model.model, model.provider))
     if not rows:
         print(
             "No models available. Create ~/.codex-shim/models.json, pass --settings /path/to/models.json, "
-            "or run `codex login` so ~/.codex/auth.json grants the gpt-5.5 passthrough.",
+            "run `codex login` for GPT passthrough, or run `cursor-agent login` for Composer passthrough.",
             file=sys.stderr,
         )
         return 1
@@ -334,25 +379,23 @@ def exec_codex(settings_path: Path, port: int, codex_args: list[str]) -> None:
 
 def exec_codex_app(settings_path: Path, port: int, path: str) -> None:
     _quit_codex_app()
-    # Try codex CLI first; fall back to direct macOS app launch if not installed
     import shutil
-    if shutil.which("codex"):
-        args = ["codex", "app", path]
-        subprocess.Popen(args, env=_with_loopback_no_proxy(os.environ.copy()))
+
+    env = _with_loopback_no_proxy(os.environ.copy())
+    codex_app = patched_codex_app_bundle()
+    if codex_app is not None:
+        subprocess.Popen(["open", "-a", str(codex_app)], env=env)
+    elif shutil.which("codex"):
+        subprocess.Popen(["codex", "app", path], env=env)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-a", "Codex"], env=env)
     else:
-        # codex CLI not found - launch Codex Desktop directly via macOS
-        if sys.platform == "darwin":
-            subprocess.Popen(
-                ["open", "-a", "Codex"],
-                env=_with_loopback_no_proxy(os.environ.copy()),
-            )
-        else:
-            print(
-                "codex CLI not found and not on macOS. "
-                "Please install codex CLI or open Codex Desktop manually.",
-                file=sys.stderr,
-            )
-            return
+        print(
+            "codex CLI not found and not on macOS. "
+            "Please install codex CLI or open Codex Desktop manually.",
+            file=sys.stderr,
+        )
+        return
     _foreground_codex_app()
 
 
@@ -381,15 +424,17 @@ def patch_codex_app() -> int:
     if sys.platform != "darwin":
         print("patch-app is macOS-only; Windows MSIX Codex Desktop cannot be patched with this ASAR helper.", file=sys.stderr)
         return 1
-    app_asar = Path("/Applications/Codex.app/Contents/Resources/app.asar")
-    info_plist = app_asar.parent.parent / "Info.plist"
+    codex_app = _codex_app_bundle_for_patch()
+    app_asar = codex_app / "Contents/Resources/app.asar"
+    info_plist = codex_app / "Contents/Info.plist"
     backup = RUNTIME_DIR / APP_ASAR_BACKUP_NAME
     info_backup = RUNTIME_DIR / INFO_PLIST_BACKUP_NAME
-    workdir = RUNTIME_DIR / "app-asar-work"
 
     if not app_asar.exists():
-        print(f"Codex app bundle not found at {app_asar}.", file=sys.stderr)
+        print(f"Codex app bundle not found at {codex_app}.", file=sys.stderr)
         return 1
+    if codex_app == USER_CODEX_APP:
+        print(f"Patching user Codex copy at {codex_app}.")
     if not info_plist.exists():
         print(f"Codex Info.plist not found at {info_plist}.", file=sys.stderr)
         return 1
@@ -410,6 +455,7 @@ def patch_codex_app() -> int:
         print(f"Backed up original Info.plist to {info_backup}.")
 
     _quit_codex_app()
+    workdir = RUNTIME_DIR / "app-asar-work-user"
     if workdir.exists():
         import shutil
 
@@ -423,7 +469,7 @@ def patch_codex_app() -> int:
     if changed:
         subprocess.run(["npx", "--yes", "asar", "pack", str(workdir), str(app_asar)], check=True)
         _update_app_asar_integrity(app_asar, info_plist)
-        _resign_codex_app()
+        _resign_codex_app(codex_app)
     return 0
 
 
@@ -431,8 +477,9 @@ def restore_codex_app_bundle() -> int:
     if sys.platform != "darwin":
         print("restore-app is macOS-only; Windows MSIX Codex Desktop cannot be restored with this ASAR helper.", file=sys.stderr)
         return 1
-    app_asar = Path("/Applications/Codex.app/Contents/Resources/app.asar")
-    info_plist = app_asar.parent.parent / "Info.plist"
+    codex_app = patched_codex_app_bundle() or _codex_app_bundle_for_patch()
+    app_asar = codex_app / "Contents/Resources/app.asar"
+    info_plist = codex_app / "Contents/Info.plist"
     backup = RUNTIME_DIR / APP_ASAR_BACKUP_NAME
     info_backup = RUNTIME_DIR / INFO_PLIST_BACKUP_NAME
     if not backup.exists():
@@ -445,7 +492,7 @@ def restore_codex_app_bundle() -> int:
         print(f"Restored {info_plist} from {info_backup}.")
     elif info_plist.exists():
         _update_app_asar_integrity(app_asar, info_plist)
-    _resign_codex_app()
+    _resign_codex_app(codex_app)
     print(f"Restored {app_asar} from {backup}.")
     return 0
 
@@ -570,15 +617,59 @@ def _read_text_lossy(path: Path) -> str:
         return path.read_text(errors="ignore")
 
 
-def _resign_codex_app() -> None:
+def patched_codex_app_bundle() -> Path | None:
+    for codex_app in (USER_CODEX_APP, SYSTEM_CODEX_APP):
+        app_asar = codex_app / "Contents/Resources/app.asar"
+        if app_asar.exists() and _app_asar_is_patched(app_asar):
+            return codex_app
+    return None
+
+
+def _codex_app_bundle_for_patch() -> Path:
+    system_asar = SYSTEM_CODEX_APP / "Contents/Resources/app.asar"
+    if system_asar.exists() and _path_is_writable(system_asar):
+        return SYSTEM_CODEX_APP
+    return _ensure_user_codex_app()
+
+
+def _ensure_user_codex_app() -> Path:
+    user_asar = USER_CODEX_APP / "Contents/Resources/app.asar"
+    if user_asar.exists():
+        return USER_CODEX_APP
+    system_asar = SYSTEM_CODEX_APP / "Contents/Resources/app.asar"
+    if not system_asar.exists():
+        raise SystemExit(f"Codex Desktop not found at {SYSTEM_CODEX_APP}.")
+    USER_CODEX_APP.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ditto", str(SYSTEM_CODEX_APP), str(USER_CODEX_APP)], check=True)
+    print(f"Copied Codex Desktop to {USER_CODEX_APP} for patching.")
+    return USER_CODEX_APP
+
+
+def _path_is_writable(path: Path) -> bool:
+    try:
+        with path.open("r+b"):
+            return True
+    except OSError:
+        return False
+
+
+def _app_asar_is_patched(app_asar: Path) -> bool:
+    try:
+        text = app_asar.read_bytes().decode("utf-8", errors="ignore")
+    except OSError:
+        return False
+    return MODEL_PICKER_REPLACEMENT in text and SIDEBAR_RECENT_THREADS_REPLACEMENT in text
+
+
+def _resign_codex_app(codex_app: Path = SYSTEM_CODEX_APP) -> None:
     # Electron validates app.asar through the bundle signature metadata at
     # startup. Re-sign after patching so the modified archive does not trip the
     # asar integrity check.
     subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", "/Applications/Codex.app"],
+        ["codesign", "--force", "--deep", "--sign", "-", str(codex_app)],
         check=True,
     )
-    print("Re-signed Codex.app after patch.")
+    print(f"Re-signed {codex_app} after patch.")
 
 
 def _foreground_codex_app() -> None:
@@ -607,7 +698,29 @@ end tell
         pass
 
 
-def _managed_config_blocks(default_slug: str, port: int, previous_top_level: dict[str, str] | None = None) -> tuple[str, str]:
+def _provider_display_name(models, slug: str, router_config=None) -> str:
+    if router_config is not None and slug == router_config.slug:
+        return router_config.display_name
+    if chatgpt_passthrough_available():
+        display_name = chatgpt_passthrough_display_names().get(slug)
+        if display_name:
+            return display_name
+    if cursor_passthrough_available():
+        display_name = cursor_passthrough_display_names().get(slug)
+        if display_name:
+            return display_name
+    for model in models:
+        if model.slug == slug:
+            return model.display_name
+    return "Codex Shim"
+
+
+def _managed_config_blocks(
+    default_slug: str,
+    port: int,
+    previous_top_level: dict[str, str] | None = None,
+    provider_name: str = "Codex Shim",
+) -> tuple[str, str]:
     metadata = ""
     if previous_top_level:
         metadata = PREVIOUS_TOP_LEVEL_PREFIX + json.dumps(previous_top_level, sort_keys=True) + "\n"
@@ -620,7 +733,7 @@ model_catalog_json = "{_toml_escape(str(CATALOG_PATH))}"
 
     provider_block = f'''{MANAGED_BEGIN}
 [model_providers.{PROVIDER_NAME}]
-name = "Codex Shim"
+name = "{_toml_escape(provider_name)}"
 base_url = "http://127.0.0.1:{port}/v1"
 wire_api = "responses"
 experimental_bearer_token = "dummy"
@@ -759,28 +872,51 @@ def _override_args(settings_path: Path, port: int) -> list[str]:
     return args
 
 
-def _resolve_model_slug(models, requested: str | None) -> str:
+def _resolve_model_slug(models, requested: str | None, router_config=None) -> str:
     if requested is None:
         current = _current_managed_model()
-        if current in _valid_model_slugs(models):
+        if current in _valid_model_slugs(models, router_config):
             return current
         try:
             return default_model_slug(models)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-    if requested in {CHATGPT_MODEL_SLUG, "openai-gpt-5-5"}:
+    if router_config is not None and requested == router_config.slug:
+        return requested
+    if is_chatgpt_passthrough_slug(requested):
         if not chatgpt_passthrough_available():
             raise SystemExit(
-                "gpt-5.5 passthrough requires a Codex login. "
+                "ChatGPT passthrough requires a Codex login. "
                 "Run `codex login` so ~/.codex/auth.json contains tokens.access_token."
             )
-        return CHATGPT_MODEL_SLUG
+        if requested.startswith("openai-gpt-"):
+            return CHATGPT_MODEL_SLUG
+        return requested
+    if is_cursor_passthrough_slug(requested):
+        if not cursor_passthrough_available():
+            raise SystemExit(
+                "Composer passthrough requires Cursor CLI login. "
+                "Run `cursor-agent login`, then `cursor-agent status`."
+            )
+        return requested if requested in cursor_passthrough_display_names() else "composer-2-5"
     by_slug = {model.slug: model.slug for model in models}
-    by_model = {}
+    by_model: dict[str, list[str]] = {}
     for model in models:
         by_model.setdefault(model.model, []).append(model.slug)
     if requested in by_slug:
         return requested
+    configured = {model.slug: model for model in models}
+    if requested in configured and not byok_model_has_credentials(configured[requested]):
+        if is_cursor_passthrough_slug(requested):
+            raise SystemExit(
+                f"Model {requested!r} is configured for BYOK but has no API key. "
+                "Remove it from ~/.codex-shim/models.json to use Cursor subscription passthrough, "
+                "or set CURSOR_API_KEY / ~/.codex-shim/cursor-api-key."
+            )
+        raise SystemExit(
+            f"Model {requested!r} is configured but has no API key. "
+            "Set the provider API key in ~/.codex-shim/models.json or the matching env var."
+        )
     if requested in by_model and len(by_model[requested]) == 1:
         return by_model[requested][0]
     matches = [model.slug for model in models if requested.lower() in model.display_name.lower()]
@@ -808,10 +944,14 @@ def _current_managed_model() -> str | None:
     return None
 
 
-def _valid_model_slugs(models) -> set[str]:
-    slugs = {model.slug for model in models}
+def _valid_model_slugs(models, router_config=None) -> set[str]:
+    slugs = {model.slug for model in usable_byok_models(models)}
+    if router_config is not None:
+        slugs.add(router_config.slug)
     if chatgpt_passthrough_available():
-        slugs.add(CHATGPT_MODEL_SLUG)
+        slugs.update(chatgpt_passthrough_slugs())
+    if cursor_passthrough_available():
+        slugs.update(cursor_passthrough_display_names())
     return slugs
 
 

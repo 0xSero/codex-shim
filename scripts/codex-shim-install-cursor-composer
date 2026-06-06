@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="${HOME}/.local/bin:/opt/homebrew/bin:${PATH}"
+
+if ! command -v cursor-agent >/dev/null 2>&1; then
+  echo "cursor-agent is not installed." >&2
+  echo "Install Cursor CLI, then run: cursor-agent login" >&2
+  exit 1
+fi
+
+# Match codex-shim subscription-first auth: stale CURSOR_API_KEY must not block login.
+if ! env -u CURSOR_API_KEY cursor-agent status >/dev/null 2>&1; then
+  echo "Cursor CLI is not logged in." >&2
+  echo "Run: cursor-agent login" >&2
+  exit 1
+fi
+
+# Composer uses built-in Cursor subscription passthrough in codex-shim.
+# Remove any stale BYOK standardagents entry that would require CURSOR_API_KEY.
+MODELS_JSON="${HOME}/.codex-shim/models.json"
+mkdir -p "${HOME}/.codex-shim"
+python3 - "${MODELS_JSON}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {"models": []}
+if path.exists():
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        data = {}
+    rows = data.get("models") if isinstance(data, dict) else []
+    if isinstance(rows, list):
+        payload["models"] = [
+            row for row in rows
+            if not (
+                isinstance(row, dict)
+                and str(row.get("slug") or row.get("model") or "").replace(".", "-")
+                in {"composer-2-5", "composer-2.5"}
+            )
+        ]
+path.write_text(json.dumps(payload, indent=2) + "\n")
+PY
+
+codex-shim restart
+codex-shim generate
+codex-shim model use composer-2-5
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  codex-shim patch-app || echo "Warning: patch-app failed; Desktop picker may need manual patch." >&2
+fi
+
+echo "Composer 2.5 is wired through your Cursor subscription (cursor-agent login)."
+echo "No Dashboard API key (crsr_...) is required."
+echo
+codex-shim list
+echo
+echo "Relaunch Desktop with: codex-app"
