@@ -26,3 +26,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Bundle inspection artifacts (dev only)
+.tmp-bundle-inspect/
