@@ -278,19 +278,43 @@ def test_restore_app_fails_off_macos(monkeypatch, capsys):
     assert "macOS-only" in capsys.readouterr().err
 
 
-def _make_picker_bundle(vars_uo: str = "u", vars_c: str = "c", vars_o: str = "a", vars_d: str = "f") -> str:
+def _make_picker_bundle(
+    vars_uo: str = "u",
+    vars_c: str = "c",
+    vars_o: str = "a",
+    vars_d: str = "f",
+) -> str:
+    """Old-style bundle: filter lives in model-queries-*.js inline as
+    `let <uo>=<c>.useHiddenModels&&<o>!==`amazonBedrock`,<d>;`. Followed by a
+    forEach so the APPLIED marker (which sniffs for `=!1[,;]...forEach`) can
+    confirm idempotency after patching.
+    """
     return (
         f"prefix let {vars_uo}={vars_c}.useHiddenModels&&{vars_o}!==`amazonBedrock`,{vars_d};"
-        f"return t[2]!=={vars_o} suffix"
+        f"return models.forEach(n=>{{}}) suffix"
     )
 
 
-def _make_sidebar_bundle(sk: str = "ye") -> str:
+def _make_new_picker_bundle(
+    vars_s: str = "s",
+    vars_i: str = "i",
+    vars_e: str = "e",
+) -> str:
+    """New-style bundle: filter helper extracted into
+    models-and-reasoning-efforts-*.js with a bare-identifier RHS:
+    `<s>=<i>&&<e>!==`amazonBedrock`;` (note: no `let`, terminator is `;`)."""
+    return (
+        f"function p(){{let a=[],o=null,{vars_s}={vars_i}&&{vars_e}!==`amazonBedrock`;"
+        f"return r.forEach(n=>{{if({vars_s}?t.has(n.model):!n.hidden){{}}}})}}"
+    )
+
+
+def _make_sidebar_bundle(sk: str = "ye", model_providers: str = "null") -> str:
     return (
         "prefix listRecentThreads({cursor:e,limit:t})"
         "{return this.params.requestClient.sendRequest(`thread/list`,"
         "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,"
-        f"modelProviders:null,archived:!1,sourceKinds:{sk}}})}}"
+        f"modelProviders:{model_providers},archived:!1,sourceKinds:{sk}}})}}"
         " suffix"
     )
 
@@ -311,19 +335,40 @@ def test_desktop_bundle_patch_applies_model_picker_and_sidebar(tmp_path):
 
 
 def test_desktop_bundle_patch_handles_renamed_minifier_locals(tmp_path):
-    """New Codex Desktop builds shuffle obfuscated variable names; the regex
+    """Older Codex Desktop builds shuffle obfuscated variable names; the regex
     needles must still match and preserve those names in the replacement."""
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)
     model_bundle = assets / "model-queries-test.js"
     sidebar_bundle = assets / "app-server-manager-signals-test.js"
-    # Old bundle names: o/d for picker, ke for sidebar.
     model_bundle.write_text(_make_picker_bundle(vars_o="o", vars_d="d"))
     sidebar_bundle.write_text(_make_sidebar_bundle(sk="ke"))
 
     assert cli._patch_codex_desktop_bundles(tmp_path) is True
     assert "let u=!1,d;" in model_bundle.read_text()
     assert "modelProviders:[],archived:!1,sourceKinds:ke" in sidebar_bundle.read_text()
+
+
+def test_desktop_bundle_patch_handles_extracted_filter_helper(tmp_path):
+    """Recent Codex Desktop builds factor the filter into
+    models-and-reasoning-efforts-*.js with a bare-identifier RHS (no `let`,
+    `;` terminator). Sidebar is already shipped with `modelProviders:[]`, so
+    the sidebar patch should report idempotent."""
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    new_picker = assets / "models-and-reasoning-efforts-test.js"
+    sidebar = assets / "app-server-manager-signals-test.js"
+    new_picker.write_text(_make_new_picker_bundle())
+    sidebar.write_text(_make_sidebar_bundle(model_providers="[]", sk="pe"))
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is True
+    # Picker filter neutralised: `s=i&&e!==…` → `s=!1`.
+    assert "s=!1;" in new_picker.read_text()
+    assert "amazonBedrock" not in new_picker.read_text()
+    # Sidebar untouched (already shipped with the fix upstream).
+    assert "modelProviders:[],archived:!1,sourceKinds:pe" in sidebar.read_text()
+    # Idempotent on a second pass.
+    assert cli._patch_codex_desktop_bundles(tmp_path) is False
 
 
 def test_desktop_bundle_patch_fails_when_sidebar_needle_is_missing(tmp_path):
