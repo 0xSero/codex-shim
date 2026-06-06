@@ -1396,9 +1396,14 @@ def _decode_thinking_payload(encoded: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+_VERSIONED_BASE_RE = re.compile(r"(?:^|/)v\d+$")
+
+
 def _join_url(base_url: str, endpoint: str) -> str:
     base = base_url.rstrip("/")
-    if base.endswith("/v1"):
+    if _VERSIONED_BASE_RE.search(base):
+        # Already ends with /v<n> (e.g. /v1, /api/coding/v3) — append
+        # the endpoint as-is rather than injecting another /v1/.
         return base + endpoint
     if endpoint == "/messages":
         return base + "/v1/messages"
