@@ -670,7 +670,9 @@ class ShimServer:
                 classify = self._make_classifier(classifier_model, config)
         log = (lambda message: print(message, flush=True)) if router_module.router_log_enabled() else None
         resolved, _info = await router_module.resolve_auto(config, candidates, body, classify, log=log)
-        return resolved or router_module.fallback_slug(config, candidates)
+        return resolved or router_module.fallback_slug(
+            config, candidates, has_image_task=router_module.has_images(body)
+        )
 
     def _make_classifier(self, model: ShimModel, config):
         timeout = ClientTimeout(total=config.timeout + 5, sock_connect=config.timeout, sock_read=config.timeout)

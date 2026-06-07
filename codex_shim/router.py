@@ -433,13 +433,35 @@ def pick_candidate(
     return None, 0.0, "no usable score"
 
 
-def fallback_slug(config: RouterConfig, candidates: list[RouterCandidate]) -> Optional[str]:
-    """Deterministic, classifier-free choice: configured default, else cheapest."""
-    if config.default and any(c.slug == config.default for c in candidates):
+def fallback_slug(
+    config: RouterConfig,
+    candidates: list[RouterCandidate],
+    has_image_task: bool = False,
+) -> Optional[str]:
+    """Deterministic, classifier-free choice.
+
+    When ``has_image_task`` is False (default), pick the configured default
+    if it is among the candidates, otherwise the cheapest candidate. This is
+    the original behaviour and is preserved so existing call sites do not
+    need to change semantics.
+
+    When ``has_image_task`` is True, ignore candidates whose
+    ``supports_images`` is False — sending an image task to a text-only
+    upstream produces a confusing 400 (`unknown variant ``image_url`` `).
+    Among the remaining vision-capable candidates, prefer the configured
+    default if it qualifies, otherwise the cheapest. If no candidate
+    supports images, return None so the caller can surface the failure
+    explicitly rather than silently routing into an upstream that will
+    reject the body.
+    """
+    pool = (
+        [c for c in candidates if c.supports_images] if has_image_task else list(candidates)
+    )
+    if not pool:
+        return None
+    if config.default and any(c.slug == config.default for c in pool):
         return config.default
-    if candidates:
-        return min(candidates, key=lambda c: float(c.cost or 0)).slug
-    return None
+    return min(pool, key=lambda c: float(c.cost or 0)).slug
 
 
 def _cache_key(signal: dict[str, Any]) -> str:
@@ -483,7 +505,7 @@ async def resolve_auto(
                 return cached, {"reason": "cache", "scores": {}}
 
         if classify is None:
-            pick = fallback_slug(config, candidates)
+            pick = fallback_slug(config, candidates, has_image_task=signal["has_images"])
             _log("[router] no classifier -> deterministic %s" % pick)
             return pick, {"reason": "no classifier", "scores": {}}
 
@@ -492,14 +514,14 @@ async def resolve_auto(
         try:
             raw = await classify(system_prompt, user_content)
         except Exception as exc:  # noqa: BLE001 - any classifier failure is non-fatal
-            pick = fallback_slug(config, candidates)
+            pick = fallback_slug(config, candidates, has_image_task=signal["has_images"])
             _log("[router] classifier failed (%s); falling back to %s" % (exc, pick))
             return pick, {"reason": "classifier error", "scores": {}}
 
         scores = parse_scores(raw, [c.slug for c in candidates])
         pick, score, why = pick_candidate(scores, candidates, config.threshold, signal["has_images"])
         if not pick:
-            pick = fallback_slug(config, candidates)
+            pick = fallback_slug(config, candidates, has_image_task=signal["has_images"])
             why = "empty scores; fallback"
             score = 0.0
         if config.cache and pick:

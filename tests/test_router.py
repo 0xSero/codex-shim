@@ -184,6 +184,59 @@ def test_fallback_slug_uses_default_then_cheapest():
     assert router.fallback_slug(config_no_default, list(CANDIDATES)) == "cheap"
 
 
+def test_fallback_slug_skips_image_incapable_when_task_has_image():
+    """When the task has images and the classifier-free fallback path runs
+    (e.g. scoring returned all zeros, or the classifier was unreachable), the
+    chosen fallback MUST be a candidate that can actually see images.
+
+    Regression: a multi-modal task fell through to ``default = cheap`` (text-only),
+    the request was forwarded to a vision-incapable upstream, and the upstream
+    rejected the body with `unknown variant ``image_url`` `. The user-visible
+    contract is "Auto Router never breaks a request"; sending an image task to
+    a text-only model breaks that contract.
+    """
+    config = router.RouterConfig(
+        enabled=True, slug="codex-auto", display_name="Auto", classifier=None,
+        threshold=0.7,
+        # default points at the text-only cheap model on purpose: that is the
+        # configuration we ship with, so the fix must work for it.
+        default="cheap",
+        cache=True, candidates=tuple(CANDIDATES), timeout=12.0, max_tokens=600,
+    )
+    # Has-image=False: keep current behaviour (default wins).
+    assert router.fallback_slug(config, list(CANDIDATES), has_image_task=False) == "cheap"
+    # Has-image=True: must skip "cheap" (supports_images=False) and pick the
+    # vision-capable candidate, even though it is not the configured default.
+    assert router.fallback_slug(config, list(CANDIDATES), has_image_task=True) == "strong"
+
+
+def test_fallback_slug_image_task_with_no_vision_candidate_returns_none():
+    """If a task has images but no candidate supports them, fallback returns
+    None rather than knowingly routing to a model that will reject the body.
+    Returning None bubbles up to server.py which can surface the failure
+    instead of producing a confusing 400 from the upstream.
+    """
+    text_only = [router.RouterCandidate(slug="only-text", cost=1.0, card="x", supports_images=False)]
+    config = router.RouterConfig(
+        enabled=True, slug="codex-auto", display_name="Auto", classifier=None,
+        threshold=0.7, default="only-text", cache=True, candidates=tuple(text_only),
+        timeout=12.0, max_tokens=600,
+    )
+    assert router.fallback_slug(config, text_only, has_image_task=True) is None
+
+
+def test_fallback_slug_default_kwarg_preserves_old_call_sites():
+    """``has_image_task`` must default to False so existing call sites and
+    tests that don't pass the kwarg keep their previous behaviour."""
+    config = router.RouterConfig(
+        enabled=True, slug="codex-auto", display_name="Auto", classifier=None,
+        threshold=0.7, default="strong", cache=True, candidates=tuple(CANDIDATES),
+        timeout=12.0, max_tokens=600,
+    )
+    # No kwarg = old behaviour = honor default ("strong"), regardless of vision.
+    assert router.fallback_slug(config, list(CANDIDATES)) == "strong"
+
+
 # ---------------------------------------------------------------------------
 # resolve_auto orchestration (with an injected fake classifier)
 # ---------------------------------------------------------------------------
