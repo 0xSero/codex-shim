@@ -9,6 +9,9 @@ and this project does not yet follow semantic versioning (pre-1.0).
 
 ### Added
 
+- `docs/subscription-integration.md`, covering ChatGPT/Codex and
+  Cursor/Composer subscription passthrough setup, troubleshooting, limitations,
+  and privacy notes.
 - Auto Router (`codex_shim/router.py`): an optional `Auto (smart routing)` picker
   entry (slug `codex-auto`) that routes each task to the cheapest configured
   model that can handle it. A cheap classifier model scores every candidate
