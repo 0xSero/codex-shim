@@ -21,6 +21,7 @@ from .cursor_passthrough import (
     is_cursor_passthrough_slug,
     iter_cursor_agent_events,
 )
+from . import router as router_module
 from .hostguard import build_allowed_hosts, host_guard_middleware
 from .settings import (
     CHATGPT_MODEL_SLUG,
@@ -31,6 +32,7 @@ from .settings import (
     PROVIDER_NAME,
     ModelSettings,
     ShimModel,
+    available_model_slugs,
     chatgpt_passthrough_available,
     chatgpt_passthrough_display_names,
     chatgpt_passthrough_slugs,
@@ -87,6 +89,16 @@ class ShimServer:
     async def api_models(self, _request: web.Request) -> web.Response:
         current = _current_managed_model()
         data: list[dict[str, Any]] = []
+        router_config = self._active_router()
+        if router_config is not None:
+            data.append(
+                {
+                    "slug": router_config.slug,
+                    "display_name": router_config.display_name,
+                    "provider": "auto",
+                    "active": current == router_config.slug,
+                }
+            )
         if chatgpt_passthrough_available():
             for slug, display_name in chatgpt_passthrough_display_names().items():
                 data.append(
@@ -129,6 +141,10 @@ class ShimServer:
         models = usable_byok_models(self.settings.load())
         valid = {m.slug for m in models}
         display_for: dict[str, str] = {m.slug: m.display_name for m in models}
+        router_config = self._active_router()
+        if router_config is not None:
+            valid.add(router_config.slug)
+            display_for[router_config.slug] = router_config.display_name
         if chatgpt_passthrough_available():
             valid.update(chatgpt_passthrough_slugs())
             display_for.update(chatgpt_passthrough_display_names())
@@ -157,12 +173,16 @@ class ShimServer:
                 "models": count,
                 "chatgpt_passthrough": chatgpt_ok,
                 "cursor_passthrough": cursor_ok,
+                "auto_router": self._active_router() is not None,
             }
         )
 
     async def models(self, _request: web.Request) -> web.Response:
         now = int(time.time())
         data: list[dict[str, Any]] = []
+        router_config = self._active_router()
+        if router_config is not None:
+            data.append(router_module.router_models_entry(router_config, now))
         if chatgpt_passthrough_available():
             data.extend(
                 {"id": slug, "object": "model", "created": now, "owned_by": "chatgpt"}
@@ -183,6 +203,7 @@ class ShimServer:
 
     async def chat_completions(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
+        body = await self._maybe_apply_auto_router(body)
         route = self._route(body)
         if route.is_openai_chat:
             forwarded = dict(body)
@@ -210,6 +231,7 @@ class ShimServer:
     async def responses(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
         _log_incoming_request("/v1/responses", body)
+        body = await self._maybe_apply_auto_router(body)
         model = str(body.get("model") or "")
         if is_chatgpt_passthrough_slug(model):
             upstream = chatgpt_upstream_model(model)
@@ -241,6 +263,7 @@ class ShimServer:
     async def responses_compact(self, request: web.Request) -> web.StreamResponse:
         body = await request.json()
         _log_incoming_request("/v1/responses/compact", body)
+        body = await self._maybe_apply_auto_router(body)
         model = str(body.get("model") or "")
         if is_chatgpt_passthrough_slug(model):
             upstream = chatgpt_upstream_model(model)
@@ -620,18 +643,98 @@ class ShimServer:
             pass
         return response
 
+    # ------------------------------------------------------------------
+    # Auto Router
+    # ------------------------------------------------------------------
+    def _active_router(self):
+        """Return the RouterConfig only when enabled and at least one candidate
+        backend is usable, so discovery never advertises a dead Auto entry."""
+        config = self.settings.load_router()
+        if config and router_module.router_is_active(config, available_model_slugs(self.settings.load())):
+            return config
+        return None
+
+    async def _maybe_apply_auto_router(self, body: dict[str, Any]) -> dict[str, Any]:
+        """If the request targets the Auto Router slug, classify the task and
+        rewrite ``model`` to the concrete backend that should handle it. Any
+        failure leaves the body untouched so the request still routes normally."""
+        config = self.settings.load_router()
+        if not config or not config.effective_enabled:
+            return body
+        if str(body.get("model") or "") != config.slug:
+            return body
+        resolved = await self._resolve_auto_model(config, body)
+        if resolved and resolved != config.slug:
+            if router_module.router_log_enabled():
+                print(f"[router] {config.slug} -> {resolved}", flush=True)
+            new_body = dict(body)
+            new_body["model"] = resolved
+            return new_body
+        return body
+
+    async def _resolve_auto_model(self, config, body: dict[str, Any]) -> str | None:
+        models = self.settings.load()
+        candidates = router_module.filter_available(config, available_model_slugs(models))
+        if not candidates:
+            return None
+        classify = None
+        if config.classifier:
+            classifier_model = self.settings.by_slug_or_model(config.classifier)
+            if (
+                classifier_model is not None
+                and byok_model_has_credentials(classifier_model)
+                and (classifier_model.is_openai_chat or classifier_model.is_anthropic)
+            ):
+                classify = self._make_classifier(classifier_model, config)
+        log = (lambda message: print(message, flush=True)) if router_module.router_log_enabled() else None
+        resolved, _info = await router_module.resolve_auto(config, candidates, body, classify, log=log)
+        return resolved or router_module.fallback_slug(
+            config, candidates, has_image_task=router_module.has_images(body)
+        )
+
+    def _make_classifier(self, model: ShimModel, config):
+        timeout = ClientTimeout(total=config.timeout + 5, sock_connect=config.timeout, sock_read=config.timeout)
+
+        async def classify(system_prompt: str, user_content: str) -> str:
+            async with ClientSession(timeout=timeout) as session:
+                if model.is_anthropic:
+                    url = _join_url(model.base_url, "/messages")
+                    payload = {
+                        "model": model.model,
+                        "max_tokens": config.max_tokens,
+                        "system": system_prompt,
+                        "messages": [{"role": "user", "content": user_content}],
+                    }
+                    upstream = await session.post(url, json=payload, headers=_anthropic_headers(model))
+                    upstream.raise_for_status()
+                    data = await upstream.json(content_type=None)
+                    return _anthropic_text(data)
+                url = _join_url(model.base_url, "/chat/completions")
+                payload = {
+                    "model": model.model,
+                    "stream": False,
+                    "temperature": 0,
+                    "max_tokens": config.max_tokens,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                }
+                upstream = await session.post(url, json=payload, headers=_openai_headers(model))
+                upstream.raise_for_status()
+                data = await upstream.json(content_type=None)
+                message = (data.get("choices") or [{}])[0].get("message") or {}
+                return str(message.get("content") or "")
+
+        return classify
+
     def _route(self, body: dict[str, Any]) -> ShimModel:
         requested = str(body.get("model") or "")
         route = self.settings.by_slug_or_model(requested)
         if route is None:
             raise web.HTTPNotFound(text=f"Unknown model slug/model: {requested}")
         if not byok_model_has_credentials(route):
-            raise web.HTTPUnauthorized(
-                text=(
-                    f"Model {route.slug} has no API key. "
-                    "Set CURSOR_API_KEY or create ~/.codex-shim/cursor-api-key."
-                )
-            )
+            raise web.HTTPUnauthorized(text=_missing_api_key_message(route))
         return route
 
     async def _post_openai_chat(
@@ -1600,9 +1703,14 @@ def _decode_thinking_payload(encoded: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+_VERSIONED_BASE_RE = re.compile(r"(?:^|/)v\d+$")
+
+
 def _join_url(base_url: str, endpoint: str) -> str:
     base = base_url.rstrip("/")
-    if base.endswith("/v1"):
+    if _VERSIONED_BASE_RE.search(base):
+        # Already ends with /v<n> (e.g. /v1, /api/coding/v3) — append
+        # the endpoint as-is rather than injecting another /v1/.
         return base + endpoint
     if endpoint == "/messages":
         return base + "/v1/messages"
@@ -1625,6 +1733,17 @@ def _anthropic_headers(route: ShimModel) -> dict[str, str]:
     if route.api_key:
         headers.setdefault("x-api-key", route.api_key)
     return headers
+
+
+def _anthropic_text(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    parts = [
+        str(block.get("text") or "")
+        for block in (payload.get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "".join(parts)
 
 
 def _sse_response() -> web.StreamResponse:
@@ -1862,6 +1981,13 @@ async def _anthropic_error_response(upstream) -> web.Response:
     if request_id:
         body["request_id"] = request_id
     return web.json_response(body, status=upstream.status)
+
+
+def _missing_api_key_message(route: ShimModel) -> str:
+    env_name = route.raw.get("api_key_env") or route.raw.get("apiKeyEnv")
+    if env_name:
+        return f"Model {route.slug} has no API key. Set {env_name} or add api_key/apiKey for this model."
+    return f"Model {route.slug} has no API key. Add api_key/apiKey or api_key_env/apiKeyEnv for this model."
 
 
 def _normalize_roles(messages: list[dict]) -> list[dict]:

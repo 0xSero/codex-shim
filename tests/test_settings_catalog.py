@@ -9,6 +9,7 @@ import pytest
 
 from codex_shim import cli
 from codex_shim.catalog import catalog_entry, write_catalog
+from codex_shim.opencode_go import opencode_go_model_row, write_opencode_go_models
 from codex_shim.settings import ModelSettings, chatgpt_passthrough_available, FALLBACK_CHATGPT_PASSTHROUGH_SLUGS
 
 
@@ -58,6 +59,207 @@ def test_legacy_custom_models_schema_still_loads(tmp_path):
     assert model.slug == "legacy-model"
     assert model.display_name == "Legacy Model"
     assert model.base_url == "http://x/v1"
+
+
+def test_api_key_env_resolves_environment_value(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_COMPAT_KEY", "env-secret")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "env-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "http://x/v1",
+                        "api_key_env": "OPENAI_COMPAT_KEY",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == "env-secret"
+
+
+def test_api_key_env_falls_back_to_literal_api_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENAI_COMPAT_KEY", raising=False)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "env-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "http://x/v1",
+                        "api_key_env": "OPENAI_COMPAT_KEY",
+                        "api_key": "literal-secret",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == "literal-secret"
+
+
+def test_api_key_env_missing_without_literal_stays_empty(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENAI_COMPAT_KEY", raising=False)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "env-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "http://x/v1",
+                        "api_key_env": "OPENAI_COMPAT_KEY",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == ""
+
+
+def test_opencode_go_model_row_prefers_chat_and_prefixes_slug():
+    row = opencode_go_model_row(
+        "glm-5.1",
+        chat_status=200,
+        messages_status=200,
+        api_key_env="OPENCODE_GO_API_KEY",
+        base_url="https://opencode.ai/zen/go/v1",
+        prefer="chat",
+    )
+
+    assert row == {
+        "slug": "ocgo-glm-5-1",
+        "model": "glm-5.1",
+        "display_name": "OpenCode Go GLM 5.1",
+        "provider": "generic-chat-completion-api",
+        "base_url": "https://opencode.ai/zen/go/v1",
+        "api_key_env": "OPENCODE_GO_API_KEY",
+        "no_image_support": True,
+        "generated_by": "codex-shim opencode-go refresh",
+        "opencode_go_endpoint": "chat",
+    }
+
+
+def test_opencode_go_model_row_uses_messages_when_chat_fails():
+    row = opencode_go_model_row(
+        "qwen3.7-max",
+        chat_status=401,
+        messages_status=200,
+        api_key_env="OPENCODE_GO_API_KEY",
+        base_url="https://opencode.ai/zen/go/v1",
+        prefer="chat",
+    )
+
+    assert row["slug"] == "ocgo-qwen3-7-max"
+    assert row["provider"] == "anthropic"
+    assert row["opencode_go_endpoint"] == "messages"
+
+
+def test_write_opencode_go_models_replaces_previous_generated_rows(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "ocgo-secret")
+    settings = tmp_path / "models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"model": "manual", "provider": "openai", "base_url": "http://manual/v1", "api_key": "k"},
+                    {
+                        "slug": "ocgo-old",
+                        "model": "old",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "https://opencode.ai/zen/go/v1",
+                        "api_key_env": "OPENCODE_GO_API_KEY",
+                        "generated_by": "codex-shim opencode-go refresh",
+                    },
+                ]
+            }
+        )
+    )
+
+    write_opencode_go_models(
+        settings,
+        [
+            opencode_go_model_row(
+                "glm-5.1",
+                chat_status=200,
+                messages_status=200,
+                api_key_env="OPENCODE_GO_API_KEY",
+                base_url="https://opencode.ai/zen/go/v1",
+                prefer="chat",
+            )
+        ],
+    )
+    models = ModelSettings(settings).load()
+
+    assert [model.slug for model in models] == ["manual", "ocgo-glm-5-1"]
+    assert [model.api_key for model in models] == ["k", "ocgo-secret"]
+
+
+def test_write_opencode_go_models_preserves_legacy_custom_models_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "ocgo-secret")
+    settings = tmp_path / "models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "customModels": [
+                    {"model": "legacy", "provider": "openai", "baseUrl": "http://legacy/v1", "apiKey": "k"},
+                ]
+            }
+        )
+    )
+
+    write_opencode_go_models(
+        settings,
+        [
+            opencode_go_model_row(
+                "glm-5.1",
+                chat_status=200,
+                messages_status=200,
+                api_key_env="OPENCODE_GO_API_KEY",
+                base_url="https://opencode.ai/zen/go/v1",
+                prefer="chat",
+            )
+        ],
+    )
+
+    on_disk = json.loads(settings.read_text())
+    assert "customModels" in on_disk
+    assert "models" not in on_disk
+    assert [row["model"] for row in on_disk["customModels"]] == ["legacy", "glm-5.1"]
+
+
+def test_refresh_opencode_go_cli_writes_discovered_models(monkeypatch, tmp_path, capsys):
+    settings = tmp_path / "models.json"
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "ocgo-secret")
+    monkeypatch.setattr("codex_shim.opencode_go.fetch_opencode_go_model_ids", lambda *_args, **_kwargs: ["glm-5.1", "qwen3.7-max"])
+    monkeypatch.setattr("codex_shim.opencode_go.probe_chat_model", lambda _base, _key, model, **_kwargs: 401 if model == "qwen3.7-max" else 200)
+    monkeypatch.setattr("codex_shim.opencode_go.probe_messages_model", lambda _base, _key, _model, **_kwargs: 200)
+
+    assert cli.main(["--settings", str(settings), "opencode-go", "refresh"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Refreshed 2 OpenCode Go models" in out
+    assert "ocgo-glm-5-1" in out
+    assert "ocgo-qwen3-7-max" in out
+    models = ModelSettings(settings).load()
+    assert [(model.slug, model.provider) for model in models] == [
+        ("ocgo-glm-5-1", "generic-chat-completion-api"),
+        ("ocgo-qwen3-7-max", "anthropic"),
+    ]
 
 
 def test_ollama_launch_models_schema_loads(tmp_path):

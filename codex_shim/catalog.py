@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import router as router_module
 from .settings import (
     CHATGPT_MODEL_SLUG,
     PROVIDER_NAME,
     ShimModel,
+    available_model_slugs,
     chatgpt_passthrough_available,
     default_model_slug,
     load_chatgpt_passthrough_catalog_models,
@@ -94,9 +96,11 @@ def chatgpt_passthrough_entry() -> dict:
     return chatgpt_passthrough_entries()[0]
 
 
-def write_catalog(models: list[ShimModel], path: Path) -> Path:
+def write_catalog(models: list[ShimModel], path: Path, router_config=None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     entries: list[dict] = []
+    if router_config is not None and router_module.router_is_active(router_config, available_model_slugs(models)):
+        entries.append(router_module.router_catalog_entry(router_config))
     if chatgpt_passthrough_available():
         entries.extend(chatgpt_passthrough_entries())
     if cursor_passthrough_available():
