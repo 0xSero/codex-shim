@@ -9,6 +9,10 @@ and this project does not yet follow semantic versioning (pre-1.0).
 
 ### Added
 
+- `codex-shim doctor`, a read-only local diagnostics command covering Python,
+  dependencies, Codex CLI availability, settings, runtime files, daemon health,
+  passthrough readiness, proxy loopback bypass, and Codex config wiring with
+  stable OK/WARN/FAIL/INFO output and summary exit-code handling.
 - Auto Router (`codex_shim/router.py`): an optional `Auto (smart routing)` picker
   entry (slug `codex-auto`) that routes each task to the cheapest configured
   model that can handle it. A cheap classifier model scores every candidate

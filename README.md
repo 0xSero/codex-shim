@@ -887,6 +887,7 @@ codex-shim generate          regenerate catalog/config without starting daemon
 codex-shim start             regenerate catalog and start local shim daemon
 codex-shim enable            start daemon and write managed ~/.codex/config.toml block
 codex-shim status            health check + model count
+codex-shim doctor            read-only local diagnostics report
 codex-shim stop              stop daemon
 codex-shim disable           remove managed config block and stop daemon
 codex-shim restart           stop, regenerate, and start daemon
@@ -906,8 +907,8 @@ codex-model [list|<slug>]    shortcut for `codex-shim model …`
 
 Global flags:
 
-- `--settings <path>`: used by catalog/model/start/app/codex flows.
-- `--port <port>`: used by daemon/provider flows.
+- `--settings <path>`: used by catalog/model/start/app/codex/doctor flows.
+- `--port <port>`: used by daemon/provider/doctor flows.
 
 `patch-app` and `restore-app` always target `/Applications/Codex.app`, do not
 use `--settings`, and exit with a clear error on Windows/Linux.
@@ -974,9 +975,17 @@ the shim, so a visited web page cannot drive them via DNS rebinding.
 ### Shim will not start
 
 ```bash
+codex-shim doctor
 codex-shim status
 tail -n 80 .codex-shim/shim.log
 ```
+
+`codex-shim doctor` prints a read-only diagnostics report grouped by section
+(Python, dependencies, Codex CLI, settings, runtime files, daemon health,
+passthrough availability, proxy bypass, and Codex config). It never writes
+configuration, starts/stops the daemon, calls model providers, or prints API
+keys/tokens. It exits 1 only when a hard `FAIL` is detected; warnings are meant
+as local setup hints.
 
 Common causes:
 
