@@ -927,10 +927,15 @@ restarting the CLI:
   `name = "..."` in `~/.codex/config.toml` so the Codex Desktop UI shows
   the selected model's display name (e.g. "Kimi K2.6") instead of the
   generic "Codex Shim" label, and optionally relaunches Codex Desktop
-  (`open -a Codex` on macOS, `taskkill` + `Codex.exe` on Windows).
+  (`open -a Codex` on macOS, `taskkill` + `Codex.exe` on Windows). This
+  state-changing picker endpoint requires the per-process
+  `X-Codex-Shim-Picker-Token` header embedded in `/picker`.
 
 All picker routes are behind the same `Host`-header allowlist as the rest of
-the shim, so a visited web page cannot drive them via DNS rebinding.
+the shim, so a visited web page cannot drive them via DNS rebinding. The
+state-changing `/api/switch` endpoint also requires a per-process picker token,
+so third-party pages cannot trigger model switches just because the loopback
+server is reachable.
 
 ---
 
@@ -944,6 +949,9 @@ the shim, so a visited web page cannot drive them via DNS rebinding.
   drives the shim with your credentials. If you deliberately bind to a
   non-loopback host, add the host(s) you reach it by to
   `CODEX_SHIM_ALLOWED_HOSTS` (comma-separated).
+- The model picker protects its state-changing `/api/switch` endpoint with a
+  per-process picker token, so cross-site pages cannot switch the active model
+  or request a Desktop restart without loading the picker page.
 - API keys stay in your settings file; the generated catalog does not contain
   them.
 - Request logs are summary-level by default and avoid full prompt/API-key dumps.

@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from codex_shim import router
 from codex_shim import server as server_module
-from codex_shim.server import ShimServer
+from codex_shim.server import PICKER_TOKEN_HEADER, ShimServer
 
 
 @pytest.fixture(autouse=True)
@@ -554,12 +554,22 @@ async def test_candidate_without_credentials_is_skipped(tmp_path):
 # ---------------------------------------------------------------------------
 async def test_switch_model_accepts_auto_slug(tmp_path, monkeypatch):
     captured = {}
-    monkeypatch.setattr(server_module, "_set_active_model", lambda slug, display=None: captured.update({"slug": slug, "display": display}))
+    monkeypatch.setattr(
+        server_module,
+        "_set_active_model",
+        lambda slug, display=None: captured.update({"slug": slug, "display": display}),
+    )
     state = {}
     upstream = await make_upstream(state)
-    shim = await _shim(_settings(tmp_path, str(upstream.make_url("/v1"))))
+    server = ShimServer(_settings(tmp_path, str(upstream.make_url("/v1"))))
+    shim = TestClient(TestServer(server.app()))
+    await shim.start_server()
 
-    resp = await shim.post("/api/switch", json={"slug": "codex-auto", "restart_codex": False})
+    resp = await shim.post(
+        "/api/switch",
+        json={"slug": "codex-auto", "restart_codex": False},
+        headers={PICKER_TOKEN_HEADER: server.picker_token},
+    )
     assert resp.status == 200
     data = await resp.json()
     assert data["ok"] is True and data["model"] == "codex-auto"
