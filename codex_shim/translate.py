@@ -315,7 +315,7 @@ def anthropic_to_chat_response(payload: dict[str, Any], requested_model: str) ->
     }
 
 
-def chat_completion_to_response(payload: dict[str, Any], requested_model: str) -> dict[str, Any]:
+def chat_completion_to_response(payload: dict[str, Any], requested_model: str, tool_types: dict[str, str] | None = None) -> dict[str, Any]:
     choice = (payload.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     output: list[dict[str, Any]] = []
@@ -340,15 +340,23 @@ def chat_completion_to_response(payload: dict[str, Any], requested_model: str) -
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
+    tool_types = tool_types or {}
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
+        name = fn.get("name", "")
+        original_type = tool_types.get(name, "")
+        item_type = "function_call"
+        if original_type == "apply_patch":
+            item_type = "custom_tool_call"
+        elif original_type.startswith("web_search"):
+            item_type = "web_search_call"
         output.append(
             {
                 "id": call.get("id", "call_0"),
-                "type": "function_call",
+                "type": item_type,
                 "status": "completed",
                 "call_id": call.get("id", "call_0"),
-                "name": fn.get("name", ""),
+                "name": name,
                 "arguments": fn.get("arguments", ""),
             }
         )
@@ -363,8 +371,8 @@ def chat_completion_to_response(payload: dict[str, Any], requested_model: str) -
     }
 
 
-def anthropic_to_response(payload: dict[str, Any], requested_model: str) -> dict[str, Any]:
-    response = chat_completion_to_response(anthropic_to_chat_response(payload, requested_model), requested_model)
+def anthropic_to_response(payload: dict[str, Any], requested_model: str, tool_types: dict[str, str] | None = None) -> dict[str, Any]:
+    response = chat_completion_to_response(anthropic_to_chat_response(payload, requested_model), requested_model, tool_types)
     response["usage"] = normalize_responses_usage(payload.get("usage"))
     return response
 
