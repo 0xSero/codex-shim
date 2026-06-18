@@ -865,6 +865,7 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
         (
             "model picker allowlist filter",
             [
+                "model-list-filter-*.js",
                 "models-and-reasoning-efforts-*.js",
                 "model-queries-*.js",
                 "*.js",
@@ -911,9 +912,16 @@ def _find_js_bundle(
     candidates: list[Path] = []
     for pattern in globs:
         candidates.extend(p for p in sorted(assets_dir.glob(pattern)) if p not in candidates)
+    texts = {path: _read_text_lossy(path) for path in candidates}
+    # Prefer a bundle that still contains the unpatched needle. Otherwise an
+    # unrelated bundle that merely matches the "already applied" regex could
+    # shadow the real target and make the patch a no-op (the case on Codex
+    # 0.141.0, where the filter moved into its own model-list-filter-*.js).
     for path in candidates:
-        text = _read_text_lossy(path)
-        if needle.search(text) or applied.search(text):
+        if needle.search(texts[path]):
+            return path
+    for path in candidates:
+        if applied.search(texts[path]):
             return path
     return None
 
