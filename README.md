@@ -11,7 +11,7 @@ Anthropic Messages, a generic OpenAI-shaped chat endpoint, or ChatGPT Codex
 passthrough), then translates streaming responses back into the shape Codex
 expects.
 
-> Tested on Codex Desktop **0.133.0-alpha.1** for macOS arm64. The shim server
+> Tested on Codex Desktop **0.133.0-alpha.1** and **0.141.0** for macOS arm64. The shim server
 > and routing layer are plain Python/aiohttp and work on Windows, macOS, Linux,
 > WSL, and Git Bash. The only macOS-specific piece is the optional Desktop picker
 > ASAR patch, needed when Codex hides custom catalog entries.
@@ -461,8 +461,16 @@ from `modelProviders: null` to `modelProviders: []` so the sidebar continues to
 show existing native `openai` chats while Desktop is routed through the
 `codex_shim` provider.
 
+`codex-shim patch-app` locates the allowlist filter automatically across the
+different bundle layouts Codex has shipped: the inline `model-queries-*.js`
+form, the extracted `models-and-reasoning-efforts-*.js` helper, and — on Codex
+Desktop **0.141.0+** — the dedicated `model-list-filter-*.js` bundle. The lookup
+prefers a bundle that still contains the unpatched needle, so an unrelated
+minified bundle can't shadow the real target and cause a false "already applied"
+no-op.
+
 The combined patch has been tested on Codex Desktop **26.519.41501** /
-`codex-cli 0.133.0-alpha.1` on macOS arm64.
+`codex-cli 0.133.0-alpha.1` and on `codex-cli 0.141.0`, both macOS arm64.
 
 > Back up `app.asar` and `Info.plist` before patching.
 
