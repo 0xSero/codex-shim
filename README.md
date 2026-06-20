@@ -11,7 +11,7 @@ Anthropic Messages, a generic OpenAI-shaped chat endpoint, or ChatGPT Codex
 passthrough), then translates streaming responses back into the shape Codex
 expects.
 
-> Tested on Codex Desktop **0.133.0-alpha.1** and **0.141.0** for macOS arm64. The shim server
+> Tested on Codex Desktop **0.133.0-alpha.1**, **0.141.0**, and **26.616.32156** for macOS arm64. The shim server
 > and routing layer are plain Python/aiohttp and work on Windows, macOS, Linux,
 > WSL, and Git Bash. The only macOS-specific piece is the optional Desktop picker
 > ASAR patch, needed when Codex hides custom catalog entries.
@@ -467,10 +467,13 @@ form, the extracted `models-and-reasoning-efforts-*.js` helper, and — on Codex
 Desktop **0.141.0+** — the dedicated `model-list-filter-*.js` bundle. The lookup
 prefers a bundle that still contains the unpatched needle, so an unrelated
 minified bundle can't shadow the real target and cause a false "already applied"
-no-op.
+no-op. This is what kept the patch a no-op on newer builds too, where the
+filter ships as `model-list-filter-*.js` (`...,s=i&&e!==\`amazonBedrock\`;`); the
+same lookup now resolves it and rewrites the guard to `s=!1`.
 
 The combined patch has been tested on Codex Desktop **26.519.41501** /
-`codex-cli 0.133.0-alpha.1` and on `codex-cli 0.141.0`, both macOS arm64.
+`codex-cli 0.133.0-alpha.1`, on `codex-cli 0.141.0`, and on Codex Desktop
+**26.616.32156**, all macOS arm64.
 
 > Back up `app.asar` and `Info.plist` before patching.
 
