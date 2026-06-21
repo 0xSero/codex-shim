@@ -77,7 +77,7 @@ MODEL_PICKER_NEEDLE = re.compile(
 )
 MODEL_PICKER_REPLACEMENT = r"\g<lhs>!1\g<sep>"
 MODEL_PICKER_APPLIED = re.compile(
-    r"(?:let )?\w+=!1[,;][^\n]{0,300}\.forEach"
+    r"\w+=!1[,;][^\n]{0,80}\w+\.has\(\w+\.model\)"
 )
 
 SIDEBAR_RECENT_THREADS_NEEDLE = re.compile(
