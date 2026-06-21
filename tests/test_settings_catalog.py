@@ -489,13 +489,13 @@ def _make_picker_bundle(
     vars_d: str = "f",
 ) -> str:
     """Old-style bundle: filter lives in model-queries-*.js inline as
-    `let u=c.useHiddenModels&&o!==`amazonBedrock`,d;`. Followed by a
-    forEach so the APPLIED marker (which sniffs for `=!1[,;]...forEach`) can
-    confirm idempotency after patching.
-    """
+    `let u=c.useHiddenModels&&o!==`amazonBedrock`,d;`. The forEach body
+    contains the `t.has(n.model)` allowlist check that follows the gate in
+    real Codex Desktop builds, which MODEL_PICKER_APPLIED sniffs to confirm
+    idempotency after patching."""
     return (
         f"prefix let {vars_uo}={vars_c}.useHiddenModels&&{vars_o}!==`amazonBedrock`,{vars_d};"
-        f"return models.forEach(n=>{{}}) suffix"
+        f"return models.forEach(n=>{{if({vars_uo}?t.has(n.model):!n.hidden){{}}}}) suffix"
     )
 
 
