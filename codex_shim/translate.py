@@ -1119,7 +1119,10 @@ def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
                     function = dict(function)
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
-                        function["arguments"] = _sanitize_string(arguments)
+                        function["arguments"] = _sanitize_tool_call_arguments(
+                            _sanitize_string(arguments),
+                            str(function.get("name") or ""),
+                        )
                     copied_call["function"] = function
                 copied_calls.append(copied_call)
             current["tool_calls"] = copied_calls
@@ -1128,6 +1131,24 @@ def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
             current["tool_call_id"] = _sanitize_string(tool_call_id)
         cleaned.append(current)
     return cleaned
+
+
+def _sanitize_tool_call_arguments(arguments: str, name: str = "") -> str:
+    """Ensure chat-completions tool-call arguments are valid JSON.
+
+    Some local models stream or truncate large freeform calls (notably
+    apply_patch). vLLM's chat renderer parses historic tool-call arguments with
+    json.loads before generation, so one malformed previous call poisons every
+    follow-up request. Preserve the raw text inside a JSON object instead.
+    """
+    if not arguments:
+        return "{}"
+    try:
+        json.loads(arguments)
+        return arguments
+    except json.JSONDecodeError:
+        key = "patch" if name == "apply_patch" else "_raw"
+        return json.dumps({key: arguments}, ensure_ascii=False)
 
 
 def _normalize_chat_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
