@@ -373,6 +373,32 @@ def test_write_catalog_includes_gpt_models_when_auth_present(tmp_path, auth_pres
     assert [model["slug"] for model in data["models"]] == list(FALLBACK_CHATGPT_PASSTHROUGH_SLUGS)
 
 
+def test_write_catalog_fills_required_fields_missing_from_codex_cache(tmp_path, auth_present, monkeypatch):
+    models_cache = tmp_path / "models-cache.json"
+    models_cache.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-current",
+                        "display_name": "GPT Current",
+                        "visibility": "list",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CODEX_MODELS_CACHE", models_cache)
+    catalog_path = tmp_path / "catalog.json"
+
+    write_catalog([], catalog_path)
+
+    [model] = json.loads(catalog_path.read_text())["models"]
+    assert model["slug"] == "gpt-current"
+    assert model["base_instructions"] == "You are Codex, a coding agent powered by GPT Current."
+    assert model["supports_parallel_tool_calls"] is True
+
+
 def test_managed_config_escapes_windows_catalog_path(monkeypatch):
     monkeypatch.setattr(cli, "CATALOG_PATH", r"C:\Users\User\codex-shim\.codex-shim\custom_model_catalog.json")
     top_block, _ = cli._managed_config_blocks("vendor\\model", 8765)

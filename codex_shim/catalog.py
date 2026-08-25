@@ -12,6 +12,7 @@ from .settings import (
     chatgpt_passthrough_available,
     default_model_slug,
     load_chatgpt_passthrough_catalog_models,
+    _minimal_chatgpt_passthrough_entry,
     usable_byok_models,
 )
 from .cursor_passthrough import cursor_catalog_entry, cursor_passthrough_available
@@ -76,7 +77,12 @@ def chatgpt_passthrough_entries() -> list[dict]:
     """Catalog entries for GPT models routed through ChatGPT passthrough."""
     entries: list[dict] = []
     for raw in load_chatgpt_passthrough_catalog_models():
-        entry = dict(raw)
+        slug = str(raw.get("slug") or "")
+        display_name = str(raw.get("display_name") or slug)
+        entry = {
+            **_minimal_chatgpt_passthrough_entry(slug, display_name),
+            **raw,
+        }
         entry["visibility"] = "list"
         entry.setdefault("available_in_plans", PLAN_TIERS)
         entry.setdefault("minimal_client_version", "0.0.1")
@@ -178,4 +184,3 @@ def _reasoning_effort(model: ShimModel) -> str:
 
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
