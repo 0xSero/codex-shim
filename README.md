@@ -222,6 +222,7 @@ the launched process environment automatically; set them globally too if you run
 codex-shim generate          # reads ~/.codex-shim/models.json if present
 codex-shim start             # background daemon on 127.0.0.1:8765
 codex-shim list              # show generated slugs and upstream routes
+codex-shim export-pi         # print the same catalog for Pi's models.json
 codex-shim status            # health probe + model count
 ```
 
@@ -599,6 +600,23 @@ Do **not** configure Composer via `cursor-api.standardagents.ai` unless you
 intentionally want Dashboard API-key billing (`crsr_…`). That path is BYOK,
 not CLI subscription.
 
+## Pi catalog
+
+`export-pi` converts the shim's advertised model IDs into a native Pi
+`models.json` provider document. It uses the appropriate OpenAI Chat,
+OpenAI Responses, or Anthropic Messages transport for each upstream entry and
+sends only an inert `dummy` bearer token to the loopback shim.
+
+To add or refresh one provider without replacing other Pi providers:
+
+```bash
+codex-shim export-pi > /tmp/codex-shim.pi.json
+jq --slurpfile shim /tmp/codex-shim.pi.json \
+  '.providers["codex-shim"] = $shim[0].providers["codex-shim"]' \
+  ~/.pi/agent/models.json > ~/.pi/agent/models.json.new
+mv ~/.pi/agent/models.json.new ~/.pi/agent/models.json
+```
+
 ---
 
 ## How routing works
@@ -892,6 +910,7 @@ codex-shim stop              stop daemon
 codex-shim disable           remove managed config block and stop daemon
 codex-shim restart           stop, regenerate, and start daemon
 codex-shim list              list generated slugs and upstream routes
+codex-shim export-pi         print a Pi-compatible model catalog JSON
 codex-shim opencode-go refresh
                             refresh OpenCode Go models into the settings file
 codex-shim model list        list slugs currently usable in the picker

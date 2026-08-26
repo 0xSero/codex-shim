@@ -20,7 +20,13 @@ import struct
 from urllib.request import urlopen
 
 from . import router as router_module
-from .catalog import _toml_escape, codex_config_overrides, write_catalog, write_config
+from .catalog import (
+    _toml_escape,
+    codex_config_overrides,
+    pi_model_catalog,
+    write_catalog,
+    write_config,
+)
 from .cursor_passthrough import (
     cursor_passthrough_available,
     cursor_passthrough_display_names,
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("generate")
     sub.add_parser("list")
+    sub.add_parser("export-pi", help="Print a native Pi agent models.json document.")
     sub.add_parser("start")
     sub.add_parser("enable")
     sub.add_parser("stop")
@@ -137,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "list":
         return list_models(args.settings)
+    if args.command == "export-pi":
+        print(json.dumps(pi_model_catalog(_load_models(args.settings), args.port), indent=2))
+        return 0
     if args.command in {"start", "enable"}:
         generate(args.settings, args.port)
         code = start(args.settings, args.port)
