@@ -5,16 +5,22 @@ from pathlib import Path
 
 from . import router as router_module
 from .settings import (
+    DEFAULT_PORT,
     CHATGPT_MODEL_SLUG,
     PROVIDER_NAME,
     ShimModel,
     available_model_slugs,
     chatgpt_passthrough_available,
+    chatgpt_passthrough_display_names,
     default_model_slug,
     load_chatgpt_passthrough_catalog_models,
     usable_byok_models,
 )
-from .cursor_passthrough import cursor_catalog_entry, cursor_passthrough_available
+from .cursor_passthrough import (
+    cursor_catalog_entry,
+    cursor_passthrough_available,
+    cursor_passthrough_display_names,
+)
 
 
 PLAN_TIERS = ["free", "plus", "pro", "team", "business", "enterprise"]
@@ -86,6 +92,94 @@ def chatgpt_passthrough_entries() -> list[dict]:
             entry["priority"] = max(int(entry.get("priority") or 0), 10000)
         entries.append(entry)
     return entries
+
+
+def pi_model_catalog(
+    models: list[ShimModel],
+    port: int = DEFAULT_PORT,
+) -> dict:
+    """Build a native Pi models.json document for this shim instance."""
+    response_base_url = f"http://127.0.0.1:{port}/v1"
+    anthropic_base_url = response_base_url.removesuffix("/v1")
+
+    pi_models: list[dict] = []
+
+    if chatgpt_passthrough_available():
+        for raw in load_chatgpt_passthrough_catalog_models():
+            slug = str(raw.get("slug") or "").strip()
+            if not slug:
+                continue
+            pi_models.append(
+                {
+                    "id": slug,
+                    "name": str(raw.get("display_name") or slug),
+                    "api": "openai-responses",
+                    "reasoning": True,
+                    "input": _pi_input(raw),
+                    "contextWindow": _pi_context(raw),
+                    "maxTokens": _pi_max_tokens(raw, 64_000),
+                }
+            )
+
+    if cursor_passthrough_available():
+        for slug, display_name in cursor_passthrough_display_names().items():
+            raw = cursor_catalog_entry()
+            pi_models.append(
+                {
+                    "id": slug,
+                    "name": display_name,
+                    "api": "openai-completions",
+                    "reasoning": False,
+                    "input": _pi_input(raw),
+                    "contextWindow": _pi_context(raw),
+                    "maxTokens": _pi_max_tokens(raw, 32_000),
+                }
+            )
+
+    for model in models:
+        if model.provider == "anthropic":
+            api = "anthropic-messages"
+            model_base_url = anthropic_base_url
+        elif model.provider in {"chatgpt", "openai", "openai-responses"}:
+            api = "openai-responses"
+            model_base_url = response_base_url
+        else:
+            api = "openai-completions"
+            model_base_url = response_base_url
+
+        entry = {
+            "id": model.slug,
+            "name": model.display_name,
+            "api": api,
+            "reasoning": False,
+            "input": ["text"] if model.no_image_support else ["text", "image"],
+            "contextWindow": model.max_context_limit or _default_context(model),
+            "maxTokens": model.max_output_tokens or 32_000,
+        }
+        if model_base_url != response_base_url:
+            entry["baseUrl"] = model_base_url
+        pi_models.append(entry)
+
+    unique_models: list[dict] = []
+    seen_ids: set[str] = set()
+    for entry in pi_models:
+        model_id = str(entry["id"])
+        if model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        unique_models.append(entry)
+
+    return {
+        "providers": {
+            "codex-shim": {
+                "name": "Codex Shim",
+                "baseUrl": response_base_url,
+                "apiKey": "dummy",
+                "authHeader": True,
+                "models": unique_models,
+            }
+        }
+    }
 
 
 def chatgpt_passthrough_entry() -> dict:
@@ -163,6 +257,24 @@ def _default_context(model: ShimModel) -> int:
     return 128_000
 
 
+def _pi_context(entry: dict) -> int:
+    value = entry.get("context_window") or entry.get("max_context_window")
+    return int(value) if isinstance(value, (int, float)) else 272_000
+
+
+def _pi_max_tokens(entry: dict, fallback: int) -> int:
+    value = entry.get("max_output_tokens") or entry.get("max_tokens")
+    return int(value) if isinstance(value, (int, float)) else fallback
+
+
+def _pi_input(entry: dict) -> list[str]:
+    value = entry.get("input_modalities")
+    if not isinstance(value, list):
+        return ["text"]
+    result = [str(item) for item in value if item in {"text", "image"}]
+    return result or ["text"]
+
+
 def _reasoning_effort(model: ShimModel) -> str:
     lower = model.display_name.lower()
     if "xhigh" in lower or "x-high" in lower:
@@ -178,4 +290,3 @@ def _reasoning_effort(model: ShimModel) -> str:
 
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
