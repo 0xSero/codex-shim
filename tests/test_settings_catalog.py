@@ -131,6 +131,143 @@ def test_api_key_env_missing_without_literal_stays_empty(monkeypatch, tmp_path):
     assert model.api_key == ""
 
 
+def test_empty_api_key_non_cursor_provider_does_not_inherit_cursor_key(monkeypatch, tmp_path):
+    """A model with an empty api_key on a non-Cursor provider must not pick up
+    the ambient Cursor key (would silently forward it to an arbitrary base_url)."""
+    cursor_key = tmp_path / "cursor-api-key"
+    cursor_key.write_text("crsr_secret\n")
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CURSOR_API_KEY_FILE", cursor_key)
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_env_secret")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "evil-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "https://attacker.example.com/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == ""
+
+
+def test_empty_api_key_non_cursor_provider_excluded_from_usable(monkeypatch, tmp_path):
+    from codex_shim.settings import byok_model_has_credentials, usable_byok_models
+
+    cursor_key = tmp_path / "cursor-api-key"
+    cursor_key.write_text("crsr_secret\n")
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CURSOR_API_KEY_FILE", cursor_key)
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_env_secret")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "evil-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "https://attacker.example.com/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    models = ModelSettings(settings).load()
+
+    assert byok_model_has_credentials(models[0]) is False
+    assert usable_byok_models(models) == []
+
+
+def test_unset_env_template_api_key_does_not_inherit_cursor_key(monkeypatch, tmp_path):
+    """``api_key: "${UNSET}"`` resolving to empty must not fall through to the
+    Cursor key for a non-Cursor provider."""
+    monkeypatch.delenv("SOME_UNSET_VAR", raising=False)
+    cursor_key = tmp_path / "cursor-api-key"
+    cursor_key.write_text("crsr_secret\n")
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CURSOR_API_KEY_FILE", cursor_key)
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_env_secret")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "evil-model",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "https://attacker.example.com/v1",
+                        "api_key": "${SOME_UNSET_VAR}",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == ""
+
+
+def test_empty_api_key_cursor_provider_inherits_cursor_key(monkeypatch, tmp_path):
+    """A Cursor-target model with no key still inherits the ambient Cursor key."""
+    cursor_key = tmp_path / "cursor-api-key"
+    cursor_key.write_text("crsr_secret\n")
+    monkeypatch.setattr("codex_shim.settings.DEFAULT_CURSOR_API_KEY_FILE", cursor_key)
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "composer-2.5",
+                        "provider": "cursor",
+                        "base_url": "https://cursor-api.standardagents.ai/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == "crsr_secret"
+
+
+def test_empty_api_key_cursor_base_url_inherits_cursor_key_from_env(monkeypatch, tmp_path):
+    """A model pointed at a Cursor base_url inherits the key even if the provider
+    label is generic."""
+    monkeypatch.setattr(
+        "codex_shim.settings.DEFAULT_CURSOR_API_KEY_FILE", tmp_path / "missing-cursor-api-key"
+    )
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_env_secret")
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "model": "composer-2.5",
+                        "provider": "generic-chat-completion-api",
+                        "base_url": "https://cursor-api.standardagents.ai/v1",
+                    }
+                ]
+            }
+        )
+    )
+
+    [model] = ModelSettings(settings).load()
+
+    assert model.api_key == "crsr_env_secret"
+
+
 def test_opencode_go_model_row_prefers_chat_and_prefixes_slug():
     row = opencode_go_model_row(
         "glm-5.1",
@@ -499,6 +636,37 @@ def test_patch_app_fails_off_macos(monkeypatch, capsys):
 
     assert cli.patch_codex_app() == 1
     assert "macOS-only" in capsys.readouterr().err
+
+
+def test_asar_command_pins_package_version(monkeypatch):
+    monkeypatch.delenv(cli.ASAR_PACKAGE_ENV, raising=False)
+    cmd = cli._asar_command("extract", "/app.asar", "/work")
+
+    # Must pin via --package <spec> rather than the unpinned `npx --yes asar ...`.
+    assert cmd[0] == "npx"
+    assert "--package" in cmd
+    idx = cmd.index("--package")
+    assert cmd[idx + 1] == cli.DEFAULT_ASAR_PACKAGE
+    # The pinned spec is an exact name@version, not a floating tag like `latest`.
+    version = cli.DEFAULT_ASAR_PACKAGE.rsplit("@", 1)[1]
+    assert version[0].isdigit()
+    # The asar subcommand + args follow the pinned package selector.
+    assert cmd[idx + 2 :] == ["asar", "extract", "/app.asar", "/work"]
+
+
+def test_asar_command_respects_env_override(monkeypatch):
+    monkeypatch.setenv(cli.ASAR_PACKAGE_ENV, "@electron/asar@9.9.9")
+    cmd = cli._asar_command("pack", "/work", "/app.asar")
+
+    assert "@electron/asar@9.9.9" in cmd
+    assert cli.DEFAULT_ASAR_PACKAGE not in cmd
+    idx = cmd.index("--package")
+    assert cmd[idx + 1] == "@electron/asar@9.9.9"
+
+
+def test_asar_package_spec_blank_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv(cli.ASAR_PACKAGE_ENV, "   ")
+    assert cli._asar_package_spec() == cli.DEFAULT_ASAR_PACKAGE
 
 
 def test_restore_app_fails_off_macos(monkeypatch, capsys):

@@ -69,6 +69,13 @@ APP_ASAR_BACKUP_NAME = "app.asar.before-codex-shim-model-picker-patch"
 INFO_PLIST_BACKUP_NAME = "Info.plist.before-codex-shim-model-picker-patch"
 SYSTEM_CODEX_APP = Path("/Applications/Codex.app")
 USER_CODEX_APP = Path.home() / "Applications" / "Codex.app"
+# Pin the ASAR packer used to rewrite the Codex Desktop app bundle. An unpinned
+# `npx --yes asar` resolves whatever the registry currently serves and runs it
+# immediately with the user's privileges against a trusted application bundle —
+# a supply-chain hazard. Pin to an exact, auditable version (overridable via
+# CODEX_SHIM_ASAR_PACKAGE for users who must use a mirror or a newer release).
+DEFAULT_ASAR_PACKAGE = "@electron/asar@4.2.0"
+ASAR_PACKAGE_ENV = "CODEX_SHIM_ASAR_PACKAGE"
 MODEL_PICKER_NEEDLE = re.compile(
     r"(?P<lhs>(?:let )?\w+=)"
     r"(?:\w+\.useHiddenModels|\w+)"
@@ -751,6 +758,27 @@ def _quit_codex_app() -> None:
         pass
 
 
+def _asar_package_spec() -> str:
+    """The pinned `name@version` ASAR package spec used for patching.
+
+    Defaults to ``DEFAULT_ASAR_PACKAGE``; can be overridden via the
+    ``CODEX_SHIM_ASAR_PACKAGE`` environment variable for mirrors or upgrades.
+    """
+    return os.environ.get(ASAR_PACKAGE_ENV, "").strip() or DEFAULT_ASAR_PACKAGE
+
+
+def _asar_command(*args: str) -> list[str]:
+    """Build a pinned ``npx`` invocation of the ASAR packer.
+
+    ``--package <pinned spec>`` forces npx to resolve and run the exact audited
+    release (``DEFAULT_ASAR_PACKAGE``) regardless of what is on ``PATH`` or in the
+    cache, instead of an unpinned ``npx --yes asar`` that runs whatever the
+    registry currently serves. ``--yes`` only auto-confirms that pinned package.
+    """
+    spec = _asar_package_spec()
+    return ["npx", "--yes", "--package", spec, "asar", *args]
+
+
 def patch_codex_app() -> int:
     if sys.platform != "darwin":
         print("patch-app is macOS-only; Windows MSIX Codex Desktop cannot be patched with this ASAR helper.", file=sys.stderr)
@@ -793,12 +821,13 @@ def patch_codex_app() -> int:
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
 
-    subprocess.run(["npx", "--yes", "asar", "extract", str(app_asar), str(workdir)], check=True)
+    print(f"Using pinned ASAR packer {_asar_package_spec()} (override with {ASAR_PACKAGE_ENV}).")
+    subprocess.run(_asar_command("extract", str(app_asar), str(workdir)), check=True)
     changed = _patch_codex_desktop_bundles(workdir)
     if changed is None:
         return 1
     if changed:
-        subprocess.run(["npx", "--yes", "asar", "pack", str(workdir), str(app_asar)], check=True)
+        subprocess.run(_asar_command("pack", str(workdir), str(app_asar)), check=True)
         _update_app_asar_integrity(app_asar, info_plist)
         _resign_codex_app(codex_app)
     return 0

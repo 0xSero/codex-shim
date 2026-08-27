@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import secrets
@@ -61,13 +62,78 @@ DEBUG_DIR = Path(__file__).resolve().parents[1] / ".codex-shim"
 CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 PICKER_TOKEN_HEADER = "X-Codex-Shim-Picker-Token"
 
+# Connect timeout (TCP + TLS) applied to every upstream call.
+UPSTREAM_CONNECT_TIMEOUT = 30.0
+# Hard wall-clock cap for non-streaming upstream calls. Streaming (SSE) calls
+# legitimately read for an unbounded time, but a non-streaming call that never
+# returns would otherwise hang an aiohttp worker forever (total=None,
+# sock_read=None == "no timeout"). Override via CODEX_SHIM_UPSTREAM_TIMEOUT.
+DEFAULT_UPSTREAM_SYNC_TIMEOUT = 300.0
+
+
+def _sync_upstream_timeout_seconds() -> float:
+    raw = _os_environ_get("CODEX_SHIM_UPSTREAM_TIMEOUT")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_UPSTREAM_SYNC_TIMEOUT
+
+
+def _os_environ_get(name: str) -> str:
+    import os
+
+    return os.environ.get(name, "").strip()
+
+
+# Defense-in-depth headers for the picker page. The page is self-contained with
+# inline <style> and <script>, so the CSP allows inline styles/scripts but blocks
+# remote loads, embedding (frame-ancestors/X-Frame-Options), and MIME sniffing,
+# making the embedded picker token harder to exfiltrate passively.
+_PICKER_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; "
+        "script-src 'unsafe-inline'; "
+        "style-src 'unsafe-inline'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'none'; "
+        "form-action 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
 
 class ShimServer:
     def __init__(self, settings_path: Path = DEFAULT_SETTINGS, host: str = DEFAULT_HOST):
         self.settings = ModelSettings(settings_path)
         self.host = host
-        self.timeout = ClientTimeout(total=None, sock_connect=120, sock_read=None)
+        # Streaming (SSE) calls read for an unbounded time, so sock_read stays
+        # None; only the connect phase is bounded. Non-streaming calls get a
+        # finite total so a stalled upstream can't hang a worker indefinitely.
+        self.timeout = ClientTimeout(
+            total=None, sock_connect=UPSTREAM_CONNECT_TIMEOUT, sock_read=None
+        )
+        self.sync_timeout = ClientTimeout(
+            total=_sync_upstream_timeout_seconds(),
+            sock_connect=UPSTREAM_CONNECT_TIMEOUT,
+            sock_read=_sync_upstream_timeout_seconds(),
+        )
         self.picker_token = secrets.token_urlsafe(32)
+        # Per-instance router cache so separate servers don't share routing
+        # state, and so a model switch can invalidate stale decisions.
+        self.router_cache = router_module.RouterCache()
+
+    def _upstream_timeout(self, body: dict[str, Any]) -> ClientTimeout:
+        """Pick the upstream timeout for a request: unbounded read for streaming
+        responses, a finite wall-clock cap for non-streaming ones."""
+        return self.timeout if body.get("stream") else self.sync_timeout
 
     def app(self) -> web.Application:
         allowed_hosts = build_allowed_hosts(self.host)
@@ -87,9 +153,15 @@ class ShimServer:
         return app
 
     async def picker_page(self, _request: web.Request) -> web.Response:
-        return web.Response(text=_picker_html(self.picker_token), content_type="text/html")
+        return web.Response(
+            text=_picker_html(self.picker_token),
+            content_type="text/html",
+            headers=_PICKER_SECURITY_HEADERS,
+        )
 
-    async def api_models(self, _request: web.Request) -> web.Response:
+    async def api_models(self, request: web.Request) -> web.Response:
+        if not self._valid_picker_token(request):
+            return web.json_response({"error": "forbidden"}, status=403)
         current = _current_managed_model()
         data: list[dict[str, Any]] = []
         router_config = self._active_router()
@@ -163,6 +235,9 @@ class ShimServer:
         if slug not in valid:
             return web.json_response({"error": f"unknown model: {slug}"}, status=404)
         _set_active_model(slug, display_for.get(slug, slug))
+        # Switching the active model is a config change: drop any cached routing
+        # decisions so stale slugs aren't served after the switch.
+        self.router_cache.clear()
         restart = bool(body.get("restart_codex"))
         if restart:
             _restart_codex_app()
@@ -496,7 +571,7 @@ class ShimServer:
             "session_id": request.headers.get("session_id", ""),
         }
         url = "https://chatgpt.com/backend-api/codex/responses"
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self._upstream_timeout(forwarded)) as session:
             upstream = await session.post(url, json=forwarded, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -562,7 +637,9 @@ class ShimServer:
             "session_id": request.headers.get("session_id", ""),
         }
         url = "https://chatgpt.com/backend-api/codex/responses/compact"
-        async with ClientSession(timeout=self.timeout) as session:
+        # Compaction is always non-streaming (stream is popped above), so use the
+        # finite sync timeout rather than the unbounded streaming one.
+        async with ClientSession(timeout=self.sync_timeout) as session:
             upstream = await session.post(url, json=forwarded, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -697,7 +774,9 @@ class ShimServer:
             ):
                 classify = self._make_classifier(classifier_model, config)
         log = (lambda message: print(message, flush=True)) if router_module.router_log_enabled() else None
-        resolved, _info = await router_module.resolve_auto(config, candidates, body, classify, log=log)
+        resolved, _info = await router_module.resolve_auto(
+            config, candidates, body, classify, log=log, cache=self.router_cache
+        )
         return resolved or router_module.fallback_slug(
             config, candidates, has_image_task=router_module.has_images(body)
         )
@@ -753,7 +832,7 @@ class ShimServer:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
         _dump_debug_request(route.slug, url, body)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self._upstream_timeout(body)) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream, slug=route.slug)
@@ -763,7 +842,7 @@ class ShimServer:
         if as_responses:
             tool_types = _build_tool_types(body)
             payload = chat_completion_to_response(payload, route.slug, tool_types)
-            intercepted = _maybe_intercept_web_search(payload)
+            intercepted = await _maybe_intercept_web_search(payload)
             return web.json_response(intercepted or payload)
         return web.json_response(payload)
 
@@ -773,7 +852,7 @@ class ShimServer:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
         _dump_debug_request(route.slug, url, body)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self._upstream_timeout(body)) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _anthropic_error_response(upstream)
@@ -787,7 +866,7 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self._upstream_timeout(body)) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -797,7 +876,7 @@ class ShimServer:
         if as_responses:
             tool_types = _build_tool_types(body)
             payload = anthropic_to_response(payload, route.slug, tool_types)
-            intercepted = _maybe_intercept_web_search(payload)
+            intercepted = await _maybe_intercept_web_search(payload)
             return web.json_response(intercepted or payload)
         return web.json_response(anthropic_to_chat_response(payload, route.slug))
 
@@ -806,7 +885,7 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self._upstream_timeout(body)) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream, slug=route.slug)
@@ -1787,9 +1866,15 @@ async def _perform_web_search(query: str) -> str:
             "Chrome/120.0.0.0 Safari/537.36"
         },
     )
-    try:
+
+    def _fetch() -> str:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+            return resp.read().decode("utf-8", errors="replace")
+
+    try:
+        # urlopen is blocking; run it off the event loop so a slow search does
+        # not stall the request handler that awaits this coroutine.
+        html = await asyncio.to_thread(_fetch)
     except Exception as exc:
         return f"Web search failed: {exc}"
 
@@ -1867,11 +1952,16 @@ async def _perform_web_search(query: str) -> str:
         return "No web search results found."
     return "\n\n".join(results)
 
-def _maybe_intercept_web_search(payload: dict[str, Any]) -> dict[str, Any] | None:
+async def _maybe_intercept_web_search(payload: dict[str, Any]) -> dict[str, Any] | None:
     """If the response payload contains a web_search_call, execute it server-side
     and return a new payload with the results embedded as a function_call_output.
 
     Returns None if no web_search_call is present (pass through unchanged).
+
+    This coroutine is awaited from the (already-running) async request handlers,
+    so it awaits ``_perform_web_search`` directly. Driving the loop with
+    ``loop.run_until_complete`` from inside a running loop raises
+    ``RuntimeError`` and would make web search silently fail.
     """
     output = payload.get("output") or []
     if not isinstance(output, list):
@@ -1891,13 +1981,7 @@ def _maybe_intercept_web_search(payload: dict[str, Any]) -> dict[str, Any] | Non
         except json.JSONDecodeError:
             args = {}
         query = args.get("query") or ""
-        # Run the search synchronously (non-streaming path only)
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            result_text = loop.run_until_complete(_perform_web_search(query))
-        except RuntimeError:
-            result_text = "Web search unavailable in this context."
+        result_text = await _perform_web_search(query)
         results.append({
             "id": f"wso_{call.get('call_id', '0')}",
             "type": "function_call_output",
@@ -2223,16 +2307,34 @@ def _normalize_roles(messages: list[dict]) -> list[dict]:
     return result
 
 
+def _debug_dump_enabled() -> bool:
+    import os
+
+    return os.environ.get("CODEX_SHIM_DEBUG_DUMP", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _dump_debug_request(slug: str, url: str, body: dict[str, Any]) -> None:
     """Best-effort dump of the last forwarded request body for debugging.
 
-    Writes ``.codex-shim/last_request.json`` next to the rest of the runtime
-    state (catalog, pid, log). Failures are silently swallowed — this is a
-    debug aid, not a code path the request should depend on.
+    Disabled by default: the dumped body contains the full conversation (code
+    context, tool output, history), so writing it unconditionally to a
+    world-readable file in the project directory is an information-disclosure
+    risk. Set ``CODEX_SHIM_DEBUG_DUMP=1`` to enable. When enabled, the directory
+    is created mode ``0o700`` and the file written mode ``0o600`` so other local
+    users cannot read it. Failures are silently swallowed — this is a debug aid,
+    not a code path the request should depend on.
     """
+    if not _debug_dump_enabled():
+        return
+    import os
+
     try:
         dump_path = DEBUG_DIR / "last_request.json"
         dump_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(dump_path.parent, 0o700)
+        except OSError:
+            pass
         payload = {"slug": slug, "url": url, "body": body}
         full = json.dumps(payload, indent=2, default=str)
         if len(full) > 2_000_000:
@@ -2246,9 +2348,18 @@ def _dump_debug_request(slug: str, url: str, body: dict[str, Any]) -> None:
                 "tool_count": len(body.get("tools") or []),
                 "last_3_messages": messages[-3:],
             }
-            dump_path.write_text(json.dumps(summary, indent=2, default=str))
-        else:
-            dump_path.write_text(full)
+            full = json.dumps(summary, indent=2, default=str)
+        # Open with O_CREAT|O_WRONLY|O_TRUNC at mode 0o600 so the file is private
+        # from creation (write_text would use the umask, often 0o644).
+        fd = os.open(dump_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(full)
+        finally:
+            try:
+                os.chmod(dump_path, 0o600)
+            except OSError:
+                pass
     except OSError as exc:
         print(f"[debug] dump failed: {exc}", flush=True)
 
@@ -2294,6 +2405,57 @@ def _set_active_model(slug: str, display_name: str | None = None) -> None:
     print(f"[switch] set active model to {slug} ({display_name})", flush=True)
 
 
+def _restart_codex_windows() -> None:
+    """Quit and relaunch Codex Desktop on Windows.
+
+    Relaunch only happens via the absolute ``Codex.exe`` path resolved from
+    ``LOCALAPPDATA``. There is deliberately no ``Popen(["Codex.exe"], shell=True)``
+    fallback: a bare executable name with ``shell=True`` triggers a ``PATH``
+    search that an attacker can hijack with a malicious ``Codex.exe`` placed
+    earlier on ``PATH``. If the real path cannot be resolved, log and skip the
+    relaunch rather than run an unresolved binary.
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import time as _time
+
+    _subprocess.run(
+        ["taskkill", "/IM", "Codex.exe", "/F"],
+        check=False,
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+    _time.sleep(1.5)
+    local_appdata = _os.environ.get("LOCALAPPDATA", "")
+    codex_exe = Path(local_appdata) / "Programs" / "Codex" / "Codex.exe" if local_appdata else None
+    if codex_exe is not None and codex_exe.exists():
+        _subprocess.Popen([str(codex_exe)])
+    else:
+        print(
+            "[restart] LOCALAPPDATA not set or Codex.exe not found"
+            + (f" at {codex_exe}" if codex_exe is not None else "")
+            + "; skipping relaunch (Codex was still quit).",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _restart_codex_macos() -> None:
+    """Quit and relaunch Codex Desktop on macOS."""
+    import subprocess as _subprocess
+    import time as _time
+
+    quit_script = 'tell application "Codex" to if it is running then quit'
+    _subprocess.run(
+        ["osascript", "-e", quit_script],
+        check=False,
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+    _time.sleep(1.5)
+    _subprocess.Popen(["open", "-a", "Codex"])
+
+
 def _restart_codex_app() -> None:
     """Quit and relaunch Codex Desktop in a background thread (non-blocking).
 
@@ -2302,36 +2464,14 @@ def _restart_codex_app() -> None:
     the branch is a no-op there.
     """
     import os as _os
-    import subprocess as _subprocess
     import threading as _threading
-    import time as _time
 
     def _do_restart() -> None:
         try:
             if _os.name == "nt":
-                _subprocess.run(
-                    ["taskkill", "/IM", "Codex.exe", "/F"],
-                    check=False,
-                    stdout=_subprocess.DEVNULL,
-                    stderr=_subprocess.DEVNULL,
-                )
-                _time.sleep(1.5)
-                local_appdata = _os.environ.get("LOCALAPPDATA", "")
-                codex_exe = Path(local_appdata) / "Programs" / "Codex" / "Codex.exe"
-                if codex_exe.exists():
-                    _subprocess.Popen([str(codex_exe)])
-                else:
-                    _subprocess.Popen(["Codex.exe"], shell=True)
+                _restart_codex_windows()
             elif sys.platform == "darwin":
-                quit_script = 'tell application "Codex" to if it is running then quit'
-                _subprocess.run(
-                    ["osascript", "-e", quit_script],
-                    check=False,
-                    stdout=_subprocess.DEVNULL,
-                    stderr=_subprocess.DEVNULL,
-                )
-                _time.sleep(1.5)
-                _subprocess.Popen(["open", "-a", "Codex"])
+                _restart_codex_macos()
         except OSError:
             pass
 
@@ -2399,7 +2539,9 @@ def _picker_html(picker_token: str) -> str:
 <script>
 const PICKER_TOKEN = @@TOKEN_JSON@@;
 async function loadModels() {
-  const res = await fetch('/api/models');
+  const res = await fetch('/api/models', {
+    headers: {'@@PICKER_HEADER@@': PICKER_TOKEN}
+  });
   const models = await res.json();
   const container = document.getElementById('models');
   container.innerHTML = '';
@@ -2457,7 +2599,7 @@ loadModels();
 </body>
 </html>'''
     return (
-        html.replace("@@TOKEN_JSON@@", token_json, 1).replace("@@PICKER_HEADER@@", PICKER_TOKEN_HEADER, 1)
+        html.replace("@@TOKEN_JSON@@", token_json, 1).replace("@@PICKER_HEADER@@", PICKER_TOKEN_HEADER)
     )
 
 

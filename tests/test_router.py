@@ -412,13 +412,16 @@ async def test_auto_router_falls_back_when_classifier_missing(tmp_path, auth_mis
 # ---------------------------------------------------------------------------
 async def test_discovery_includes_auto_model(tmp_path, auth_missing):
     settings = _settings_with_router(tmp_path, "http://upstream.invalid/v1")
-    shim = TestClient(TestServer(ShimServer(settings).app()))
+    server = ShimServer(settings)
+    shim = TestClient(TestServer(server.app()))
     await shim.start_server()
 
     models = await (await shim.get("/v1/models")).json()
     assert "codex-auto" in [m["id"] for m in models["data"]]
 
-    api = await (await shim.get("/api/models")).json()
+    api = await (
+        await shim.get("/api/models", headers={"X-Codex-Shim-Picker-Token": server.picker_token})
+    ).json()
     auto = [m for m in api if m["slug"] == "codex-auto"]
     assert auto and auto[0]["provider"] == "auto"
 
@@ -452,3 +455,87 @@ def test_write_catalog_includes_auto_entry(tmp_path, auth_missing):
     data = json.loads(catalog_path.read_text())
     slugs = [m["slug"] for m in data["models"]]
     assert slugs[0] == "codex-auto"
+
+
+# ---------------------------------------------------------------------------
+# RouterCache: bounded LRU eviction, per-instance isolation, invalidation (#44)
+# ---------------------------------------------------------------------------
+def test_router_cache_lru_evicts_oldest_not_bulk_clear():
+    cache = router.RouterCache(maxsize=3)
+    for i in range(3):
+        cache.put(f"k{i}", f"v{i}")
+    # Touch k0 so it becomes most-recently-used.
+    assert cache.get("k0") == "v0"
+    # Insert a 4th entry: the least-recently-used (k1) is evicted, others remain.
+    cache.put("k3", "v3")
+    assert len(cache) == 3  # bounded, NOT bulk-cleared to 0
+    assert cache.get("k1") is None
+    assert cache.get("k0") == "v0"
+    assert cache.get("k2") == "v2"
+    assert cache.get("k3") == "v3"
+
+
+def test_router_cache_clear_empties_store():
+    cache = router.RouterCache(maxsize=8)
+    cache.put("a", "1")
+    cache.put("b", "2")
+    cache.clear()
+    assert len(cache) == 0
+    assert cache.get("a") is None
+
+
+async def test_resolve_auto_uses_supplied_cache_instance():
+    calls = []
+
+    async def classify(_s, _u):
+        calls.append(1)
+        return json.dumps({"scores": {"cheap": 0.9, "strong": 0.95}})
+
+    cache_a = router.RouterCache()
+    cache_b = router.RouterCache()
+    body = {"input": "add a docstring"}
+
+    first, _ = await router.resolve_auto(_config(cache=True), list(CANDIDATES), body, classify, cache=cache_a)
+    # Same body, different cache instance -> must re-run the classifier (no shared state).
+    second, info = await router.resolve_auto(_config(cache=True), list(CANDIDATES), body, classify, cache=cache_b)
+    assert first == second == "cheap"
+    assert len(calls) == 2
+    # Re-using cache_a serves from cache (no extra classifier call).
+    third, info3 = await router.resolve_auto(_config(cache=True), list(CANDIDATES), body, classify, cache=cache_a)
+    assert third == "cheap"
+    assert len(calls) == 2
+    assert info3["reason"] == "cache"
+
+
+async def test_switch_model_clears_router_cache(tmp_path, auth_missing, monkeypatch):
+    from codex_shim import server as server_module
+    from codex_shim.server import PICKER_TOKEN_HEADER
+
+    settings = _settings_with_router(tmp_path, "http://upstream.invalid/v1")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'model = "cheap-real"\n'
+        'model_provider = "codex_shim"\n\n'
+        '[model_providers.codex_shim]\n'
+        'name = "Codex Shim"\n'
+    )
+    monkeypatch.setattr(server_module, "CODEX_CONFIG_PATH", config)
+    monkeypatch.setattr(server_module, "_restart_codex_app", lambda: None)
+
+    shim = ShimServer(settings)
+    shim.router_cache.put("k0", "cheap")
+    assert len(shim.router_cache) == 1
+
+    client = TestClient(TestServer(shim.app()))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/switch",
+            json={"slug": "strong", "restart_codex": False},
+            headers={PICKER_TOKEN_HEADER: shim.picker_token},
+        )
+        assert resp.status == 200
+        # The model switch must invalidate stale routing decisions.
+        assert len(shim.router_cache) == 0
+    finally:
+        await client.close()

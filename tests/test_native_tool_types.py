@@ -1,7 +1,6 @@
 """Tests for native tool type mapping in the streaming translator and non-streaming response helpers."""
 from __future__ import annotations
 
-import json
 from codex_shim.translate import chat_completion_to_response, anthropic_to_response
 from codex_shim.server import _build_tool_types
 

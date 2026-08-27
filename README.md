@@ -538,6 +538,15 @@ codex-shim patch-app
 codex-shim restore-app
 ```
 
+`patch-app` rewrites the Codex Desktop `app.asar` using a **pinned** ASAR packer
+(`@electron/asar@4.2.0`) rather than an unpinned `npx --yes asar`, so a registry
+compromise of the latest `asar` release cannot inject code into the bundle. To
+use a mirror or a newer audited release, set `CODEX_SHIM_ASAR_PACKAGE`, e.g.:
+
+```bash
+CODEX_SHIM_ASAR_PACKAGE="@electron/asar@4.2.0" codex-shim patch-app
+```
+
 If Codex still crashes after `patch-app`, restore with `codex-shim restore-app`
 and re-check the manual patch needles against the installed Desktop build.
 
@@ -956,8 +965,16 @@ server is reachable.
 - API keys stay in your settings file; the generated catalog does not contain
   them.
 - Request logs are summary-level by default and avoid full prompt/API-key dumps.
+- The full-request debug dump (`.codex-shim/last_request.json`) is **disabled by
+  default** because it contains the whole conversation body. Enable it only for
+  debugging with `CODEX_SHIM_DEBUG_DUMP=1`; when enabled, the file is written
+  private to your user (`0600`) inside a `0700` directory.
 - ChatGPT passthrough reads `~/.codex/auth.json` at request time and forwards
   the access token only to ChatGPT's Codex endpoint.
+- Non-streaming upstream calls use a finite wall-clock timeout (default 300s) so
+  a stalled or unresponsive provider can't hang a worker indefinitely; streaming
+  (SSE) calls keep an unbounded read deadline but a bounded connect phase.
+  Override the non-streaming cap with `CODEX_SHIM_UPSTREAM_TIMEOUT` (seconds).
 - If you put a prompt-catching proxy in front of the shim, that proxy controls
   what it logs. Redact or hash large/private prompt bodies there.
 

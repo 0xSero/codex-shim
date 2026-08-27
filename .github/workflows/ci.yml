@@ -7,13 +7,33 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    name: lint + type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Ruff lint (blocking)
+        run: python -m ruff check codex_shim/ tests/
+      - name: Mypy type check (report-only)
+        # The codebase is not yet fully typed; surface issues without failing CI.
+        run: python -m mypy codex_shim/ || true
+
   test:
     name: pytest (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -27,5 +47,5 @@ jobs:
           python -m pip install -e ".[dev]"
       - name: Compile check
         run: python -m compileall codex_shim/ -q
-      - name: Run tests
-        run: python -m pytest tests/ -q
+      - name: Run tests with coverage
+        run: python -m pytest tests/ -q --cov=codex_shim --cov-report=term-missing --cov-fail-under=70

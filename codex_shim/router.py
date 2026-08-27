@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -41,7 +42,53 @@ DEFAULT_TIMEOUT = 12.0
 DEFAULT_MAX_TOKENS = 600
 
 _CACHE_MAX = 256
-_cache: dict[str, str] = {}
+
+
+class RouterCache:
+    """Bounded LRU cache mapping a task signal to a chosen candidate slug.
+
+    Replaces the previous module-level ``dict`` whose only eviction was a bulk
+    ``clear()`` at capacity (flip-flopping between full and empty, and causing a
+    thundering herd of classifier calls). Each ``ShimServer`` owns its own
+    instance so separate servers/sessions don't share routing state, and the
+    cache is invalidated on model-config changes (e.g. picker model switch).
+
+    Note: keys use Python's built-in ``hash()`` of the task text, which is not
+    stable across process restarts (PYTHONHASHSEED); the cache is therefore only
+    valid for a single process lifetime.
+    """
+
+    def __init__(self, maxsize: int = _CACHE_MAX) -> None:
+        self.maxsize = maxsize
+        self._store: "OrderedDict[str, str]" = OrderedDict()
+
+    def get(self, key: str) -> Optional[str]:
+        if key not in self._store:
+            return None
+        self._store.move_to_end(key)
+        return self._store[key]
+
+    def put(self, key: str, value: str) -> None:
+        self._store[key] = value
+        self._store.move_to_end(key)
+        while len(self._store) > self.maxsize:
+            self._store.popitem(last=False)
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._store
+
+
+# Process-wide default cache, used when a caller does not supply its own.
+# Kept for backwards compatibility with callers/tests that invoke resolve_auto
+# without an explicit cache. New call sites (ShimServer) pass a per-instance
+# cache so configuration changes can invalidate routing decisions.
+_cache = RouterCache()
 
 # An async callable that takes (system_prompt, user_content) and returns the
 # classifier model's raw reply text.
@@ -468,8 +515,9 @@ def _cache_key(signal: dict[str, Any]) -> str:
     return "%s|%s" % (signal["has_images"], hash(signal["task"]))
 
 
-def reset_cache() -> None:
-    _cache.clear()
+def reset_cache(cache: Optional[RouterCache] = None) -> None:
+    """Clear a router cache (the process-wide default unless one is given)."""
+    (cache if cache is not None else _cache).clear()
 
 
 # ---------------------------------------------------------------------------
@@ -482,9 +530,15 @@ async def resolve_auto(
     classify: Optional[ClassifyFn],
     *,
     log: Optional[Callable[[str], None]] = None,
+    cache: Optional[RouterCache] = None,
 ) -> tuple[Optional[str], dict[str, Any]]:
     """Return the concrete candidate slug the Auto Router selects for this
-    request (or ``None`` if nothing is routable). Never raises."""
+    request (or ``None`` if nothing is routable). Never raises.
+
+    ``cache`` lets the caller supply a per-instance :class:`RouterCache`; when
+    omitted the process-wide default is used."""
+
+    cache = cache if cache is not None else _cache
 
     def _log(message: str) -> None:
         if log:
@@ -499,7 +553,7 @@ async def resolve_auto(
         signal = task_signal(body)
         key = _cache_key(signal)
         if config.cache:
-            cached = _cache.get(key)
+            cached = cache.get(key)
             if cached and any(c.slug == cached for c in candidates):
                 _log("[router] cache-hit -> %s" % cached)
                 return cached, {"reason": "cache", "scores": {}}
@@ -525,9 +579,7 @@ async def resolve_auto(
             why = "empty scores; fallback"
             score = 0.0
         if config.cache and pick:
-            if len(_cache) >= _CACHE_MAX:
-                _cache.clear()
-            _cache[key] = pick
+            cache.put(key, pick)
         _log(
             "[router] -> %s (score=%.2f; %s) scores=%s"
             % (pick, score, why, json.dumps({c.slug: round(scores.get(c.slug, 0.0), 2) for c in candidates}))

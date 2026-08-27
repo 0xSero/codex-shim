@@ -21,6 +21,12 @@ venv/
 build/
 dist/
 *.egg-info/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Editor / OS
 .DS_Store

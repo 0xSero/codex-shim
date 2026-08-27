@@ -237,7 +237,7 @@ class ModelSettings:
             if api_key_env:
                 api_key = os.environ.get(api_key_env, api_key).strip()
             else:
-                api_key = _resolve_api_key(api_key)
+                api_key = _resolve_api_key(api_key, provider=provider, base_url=base_url)
             models.append(
                 ShimModel(
                     slug=slug,
@@ -330,17 +330,35 @@ def _field(row: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _resolve_api_key(value: str) -> str:
+def _is_cursor_target(provider: str, base_url: str) -> bool:
+    """Whether a model entry should inherit the ambient Cursor API key.
+
+    The Cursor Dashboard key (``~/.codex-shim/cursor-api-key`` / ``CURSOR_API_KEY``)
+    is a credential for Cursor's own BYOK endpoints. Only entries that actually
+    point at Cursor should fall back to it — never an arbitrary third-party
+    ``base_url``, which would silently forward the Cursor key to that host.
+    """
+    if provider.strip().lower() in {"cursor", "cursor-passthrough"}:
+        return True
+    host = base_url.strip().lower()
+    return "cursor.com" in host or "cursor.sh" in host or "cursor-api." in host
+
+
+def _resolve_api_key(value: str, provider: str = "", base_url: str = "") -> str:
     raw = value.strip()
     if raw.startswith("${") and raw.endswith("}"):
         raw = os.environ.get(raw[2:-1].strip(), "")
-    if not raw and DEFAULT_CURSOR_API_KEY_FILE.exists():
-        try:
-            raw = DEFAULT_CURSOR_API_KEY_FILE.read_text().strip()
-        except OSError:
-            raw = ""
-    if not raw:
-        raw = os.environ.get("CURSOR_API_KEY", "").strip()
+    # Only fall back to the ambient Cursor key for Cursor-target models. An empty
+    # key on any other provider stays empty so the model is excluded from the
+    # usable set rather than silently forwarding the Cursor key upstream.
+    if not raw and _is_cursor_target(provider, base_url):
+        if DEFAULT_CURSOR_API_KEY_FILE.exists():
+            try:
+                raw = DEFAULT_CURSOR_API_KEY_FILE.read_text().strip()
+            except OSError:
+                raw = ""
+        if not raw:
+            raw = os.environ.get("CURSOR_API_KEY", "").strip()
     return raw
 
 
