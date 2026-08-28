@@ -219,6 +219,29 @@ def test_responses_to_chat_sanitizes_and_merges_strict_provider_messages():
     ]
 
 
+def test_responses_to_chat_wraps_malformed_tool_arguments_for_vllm_history():
+    body = {
+        "model": "slug",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "apply_patch",
+                "arguments": '{"input": "--- /dev/null\n+++ butterfly.svg\n@@\n+<svg',
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "aborted"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "was ist passiert"}]},
+        ],
+    }
+
+    out = responses_to_chat(body, "real-model")
+
+    arguments = out["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert arguments == (
+        '{"patch": "{\\"input\\": \\"--- /dev/null\\n+++ butterfly.svg\\n@@\\n+<svg"}'
+    )
+
+
 def test_responses_function_tools_convert_to_chat_shape():
     body = {
         "model": "slug",
